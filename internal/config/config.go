@@ -70,6 +70,10 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
+	// UsageDBPath overrides the SQLite database path for usage statistics persistence.
+	// When empty, defaults to usage.db alongside the config file.
+	UsageDBPath string `yaml:"usage-db-path" json:"usage-db-path"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 

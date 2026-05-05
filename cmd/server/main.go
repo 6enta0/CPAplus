@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -420,6 +421,7 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -569,11 +571,25 @@ func main() {
 				}
 			}
 		} else {
-			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
+			}
+			usageDBPath := cfg.UsageDBPath
+			if usageDBPath == "" && configFilePath != "" {
+				usageDBPath = usage.ResolveDBPath(configFilePath)
+			}
+			if usageDBPath != "" {
+				sqliteStore, errInitUsage := usage.InitSQLitePersistence(usageDBPath)
+				if errInitUsage != nil {
+					log.WithError(errInitUsage).Warn("usage: sqlite persistence init failed")
+				}
+				defer func() {
+					if sqliteStore != nil {
+						_ = sqliteStore.Close()
+					}
+				}()
 			}
 			cmd.StartService(cfg, configFilePath, password)
 		}
