@@ -265,6 +265,7 @@ func (a *Auth) indexSeed() string {
 	baseURL := ""
 	apiKey := ""
 	source := ""
+	prefix := ""
 	if a.Attributes != nil {
 		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
 			providerKey = strings.ToLower(value)
@@ -273,6 +274,7 @@ func (a *Auth) indexSeed() string {
 		baseURL = strings.TrimSpace(a.Attributes["base_url"])
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
 		source = strings.TrimSpace(a.Attributes["source"])
+		prefix = strings.TrimSpace(a.Attributes["prefix"])
 	}
 
 	proxyURL := strings.TrimSpace(a.ProxyURL)
@@ -293,6 +295,9 @@ func (a *Auth) indexSeed() string {
 		}
 		if source != "" {
 			parts = append(parts, "source="+source)
+		}
+		if prefix != "" {
+			parts = append(parts, "prefix="+prefix)
 		}
 		return "config:" + strings.Join(parts, "\x00")
 	}

@@ -101,6 +101,58 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestEnsureIndexDifferentPrefixDifferentIndex(t *testing.T) {
+	t.Parallel()
+
+	sameKeyNoPrefix := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "sk-same-key",
+			"compat_name":  "my-provider",
+			"provider_key": "my-provider",
+			"source":       "config:my-provider[token1]",
+		},
+	}
+	sameKeyWithPrefix := &Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":      "sk-same-key",
+			"compat_name":  "my-provider",
+			"provider_key": "my-provider",
+			"prefix":       "alt-prefix",
+			"source":       "config:my-provider[token2]",
+		},
+	}
+
+	noPrefixIdx := sameKeyNoPrefix.EnsureIndex()
+	withPrefixIdx := sameKeyWithPrefix.EnsureIndex()
+
+	if noPrefixIdx == "" {
+		t.Fatal("no-prefix index should not be empty")
+	}
+	if withPrefixIdx == "" {
+		t.Fatal("with-prefix index should not be empty")
+	}
+	if noPrefixIdx == withPrefixIdx {
+		t.Fatalf("same api_key+name with different prefix produced duplicate auth_index %q", noPrefixIdx)
+	}
+}
+
+func TestEnsureIndexFileBasedUnchanged(t *testing.T) {
+	t.Parallel()
+
+	fileAuth := &Auth{
+		FileName: "claude-user@example.com.json",
+	}
+	idx := fileAuth.EnsureIndex()
+	if idx == "" {
+		t.Fatal("file-based index should not be empty")
+	}
+	if len(idx) != 16 {
+		t.Fatalf("file-based index length = %d, want 16", len(idx))
+	}
+}
+
 func TestRecentRequestsSnapshotEmptyReturnsTwentyBuckets(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).In(time.Local)
 	a := &Auth{}

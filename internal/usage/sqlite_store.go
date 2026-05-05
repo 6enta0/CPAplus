@@ -15,6 +15,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const usageSchemaVersion = 2
+
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS usage_records (
 	id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,9 +60,25 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 	db.SetMaxOpenConns(1)
 
+	if needsRebuild, _ := checkSchemaVersion(db, usageSchemaVersion); needsRebuild {
+		log.Warn("usage db: schema version mismatch, rebuilding tables (historical data will be lost)")
+		if _, err = db.Exec("DROP TABLE IF EXISTS usage_records"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("failed to drop old usage_records: %w", err)
+		}
+		if _, err = db.Exec("DROP TABLE IF EXISTS usage_schema_meta"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("failed to drop old usage_schema_meta: %w", err)
+		}
+	}
+
 	if _, err = db.Exec(createTableSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to init usage db schema: %w", err)
+	}
+
+	if err = setSchemaVersion(db, usageSchemaVersion); err != nil {
+		log.WithError(err).Warn("usage db: failed to persist schema version")
 	}
 
 	pragmas := []string{
@@ -346,4 +364,25 @@ func (s *SQLiteStore) ExportSnapshot() (StatisticsSnapshot, error) {
 	}
 
 	return stats.Snapshot(), nil
+}
+
+func checkSchemaVersion(db *sql.DB, expected int) (needsRebuild bool, current int) {
+	row := db.QueryRow("SELECT version FROM usage_schema_meta LIMIT 1")
+	if err := row.Scan(&current); err != nil {
+		return true, 0
+	}
+	return current != expected, current
+}
+
+func setSchemaVersion(db *sql.DB, version int) error {
+	_, err := db.Exec("CREATE TABLE IF NOT EXISTS usage_schema_meta (version INTEGER NOT NULL)")
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("DELETE FROM usage_schema_meta")
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("INSERT INTO usage_schema_meta (version) VALUES (?)", version)
+	return err
 }
