@@ -91,12 +91,82 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 
 ## クイックスタート
 
+### 方法1：Dockerデプロイ（Clone不要）
+
+最も簡単な方法—GoやNode.jsのインストール不要。
+
 ```bash
-go build -o cli-proxy-api ./cmd/server
-./cli-proxy-api --config config.yaml
+# 1. 作業ディレクトリを作成
+mkdir cpa-plus && cd cpa-plus
+
+# 2. 設定テンプレートとdocker-composeファイルをダウンロード
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
+mv config.example.yaml config.yaml
+
+# 3. config.yamlを編集 — api-keys、openai-compatibilityなどを入力
+#    使用データを永続化するには以下の行を追加：
+#      usage-db-path: "./data/usage.db"
+
+# 4. 必要なディレクトリを作成して起動
+mkdir -p auths logs
+docker compose up -d
+
+# 5. 管理ダッシュボードを開く
+# http://localhost:8317/management.html
 ```
 
-設定リファレンスは[config.example.yaml](config.example.yaml)を参照してください。
+### 方法2：Goで直接実行（Cloneして実行）
+
+Goがインストール済みのユーザー向け。
+
+```bash
+# 1. リポジトリをClone
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. 設定をコピーして編集
+cp config.example.yaml config.yaml
+# config.yamlを編集 — api-keys、openai-compatibilityなどを入力
+
+# 3. 実行
+go run ./cmd/server --config config.yaml
+
+# 4. 管理ダッシュボードを開く
+# http://localhost:8317/management.html
+```
+
+### 方法3：ソースからDockerイメージをビルド
+
+カスタマイズして独自イメージをビルドしたい開発者向け。
+
+```bash
+# 1. リポジトリをClone
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. 設定をコピーして編集
+cp config.example.yaml config.yaml
+
+# 3. ビルドして起動
+./docker-build.sh   # 2を選択
+
+# 4. 管理ダッシュボードを開く
+# http://localhost:8317/management.html
+```
+
+### 設定
+
+完全な設定リファレンスは[config.example.yaml](config.example.yaml)を参照してください。主な設定項目：
+
+| 設定項目 | 説明 |
+|----------|------|
+| `api-keys` | プロキシにアクセスするためのクライアントAPIキー |
+| `openai-compatibility` | 上游プロバイダー設定（name、base-url、prefix、api-key、models） |
+| `codex` | Codex（OpenAI OAuth）クレデンシャル設定 |
+| `usage-statistics-enabled` | 使用量トラッキングとコスト計算を有効化 |
+| `usage-db-path` | SQLiteデータベースパス、使用データを永続化（デフォルト：`usage.db`） |
+| `remote-management` | 管理ダッシュボードアクセス設定（secret-keyで認証） |
 
 ## ライセンス
 

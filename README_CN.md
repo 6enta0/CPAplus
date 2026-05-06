@@ -91,12 +91,82 @@
 
 ## 快速开始
 
+### 方式一：Docker 部署（无需 Clone）
+
+最简单的方式——无需安装 Go 或 Node.js。
+
 ```bash
-go build -o cli-proxy-api ./cmd/server
-./cli-proxy-api --config config.yaml
+# 1. 创建工作目录
+mkdir cpa-plus && cd cpa-plus
+
+# 2. 下载配置模板和 docker-compose 文件
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
+mv config.example.yaml config.yaml
+
+# 3. 编辑 config.yaml — 填入 api-keys、openai-compatibility 等
+#    添加以下行以持久化使用数据：
+#      usage-db-path: "./data/usage.db"
+
+# 4. 创建必要目录并启动
+mkdir -p auths logs
+docker compose up -d
+
+# 5. 打开管理面板
+# http://localhost:8317/management.html
 ```
 
-配置参考见 [config.example.yaml](config.example.yaml)。
+### 方式二：Go 直接运行（Clone 后运行）
+
+适合已安装 Go 的用户。
+
+```bash
+# 1. Clone 仓库
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. 复制并编辑配置
+cp config.example.yaml config.yaml
+# 编辑 config.yaml — 填入 api-keys、openai-compatibility 等
+
+# 3. 运行
+go run ./cmd/server --config config.yaml
+
+# 4. 打开管理面板
+# http://localhost:8317/management.html
+```
+
+### 方式三：从源码构建 Docker 镜像
+
+适合想自定义并构建自己镜像的开发者。
+
+```bash
+# 1. Clone 仓库
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. 复制并编辑配置
+cp config.example.yaml config.yaml
+
+# 3. 构建并启动
+./docker-build.sh   # 选择 2
+
+# 4. 打开管理面板
+# http://localhost:8317/management.html
+```
+
+### 配置说明
+
+完整配置参考 [config.example.yaml](config.example.yaml)。关键配置项：
+
+| 配置项 | 说明 |
+|--------|------|
+| `api-keys` | 客户端访问代理的 API 密钥 |
+| `openai-compatibility` | 上游提供商配置（name、base-url、prefix、api-key、models） |
+| `codex` | Codex（OpenAI OAuth）凭证配置 |
+| `usage-statistics-enabled` | 启用使用量追踪和费用计算 |
+| `usage-db-path` | SQLite 数据库路径，持久化使用数据（默认：`usage.db`） |
+| `remote-management` | 管理面板访问配置（secret-key 用于认证） |
 
 ## 许可证
 

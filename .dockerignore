@@ -19,7 +19,12 @@ LICENSE
 auths/*
 logs/*
 conv/*
+data/*
 config.yaml
+usage.db
+usage.db-shm
+usage.db-wal
+test-config.yaml
 
 # Development/editor
 bin/*
@@ -35,3 +40,7 @@ bin/*
 .bmad/*
 _bmad/*
 _bmad-output/*
+.trellis/*
+.github/copilot/
+.github/hooks/
+.github/prompts/

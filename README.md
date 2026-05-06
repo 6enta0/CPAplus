@@ -91,12 +91,82 @@ Modified from:
 
 ## Quick Start
 
+### Option 1: Docker (No Clone Required)
+
+The easiest way — no Go or Node.js installation needed.
+
 ```bash
-go build -o cli-proxy-api ./cmd/server
-./cli-proxy-api --config config.yaml
+# 1. Create a working directory
+mkdir cpa-plus && cd cpa-plus
+
+# 2. Download config template and docker-compose file
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
+curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
+mv config.example.yaml config.yaml
+
+# 3. Edit config.yaml — fill in api-keys, openai-compatibility, etc.
+#    Add this line to persist usage data:
+#      usage-db-path: "./data/usage.db"
+
+# 4. Create required directories and start
+mkdir -p auths logs
+docker compose up -d
+
+# 5. Open management dashboard
+# http://localhost:8317/management.html
 ```
 
-See [config.example.yaml](config.example.yaml) for configuration reference.
+### Option 2: Go Run (Clone & Run)
+
+For users who want to run directly with Go.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. Copy and edit config
+cp config.example.yaml config.yaml
+# Edit config.yaml — fill in api-keys, openai-compatibility, etc.
+
+# 3. Run
+go run ./cmd/server --config config.yaml
+
+# 4. Open management dashboard
+# http://localhost:8317/management.html
+```
+
+### Option 3: Docker Build from Source
+
+For developers who want to customize and build their own image.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/6enta0/CPAplus.git
+cd CPAplus
+
+# 2. Copy and edit config
+cp config.example.yaml config.yaml
+
+# 3. Build and start
+./docker-build.sh   # Choose option 2
+
+# 4. Open management dashboard
+# http://localhost:8317/management.html
+```
+
+### Configuration
+
+See [config.example.yaml](config.example.yaml) for full configuration reference. Key settings:
+
+| Setting | Description |
+|---------|-------------|
+| `api-keys` | Client API keys for accessing the proxy |
+| `openai-compatibility` | Upstream provider configs (name, base-url, prefix, api-key, models) |
+| `codex` | Codex (OpenAI OAuth) credential configs |
+| `usage-statistics-enabled` | Enable usage tracking and cost calculation |
+| `usage-db-path` | SQLite database path for usage persistence (default: `usage.db`) |
+| `remote-management` | Management dashboard access (secret-key for auth) |
 
 ## License
 

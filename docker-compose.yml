@@ -1,28 +1,18 @@
 services:
-  cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+  cpa-plus:
+    image: ${CPA_PLUS_IMAGE:-6enta0/cpaplus:latest}
     pull_policy: always
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: ${VERSION:-dev}
-        COMMIT: ${COMMIT:-none}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
-    # env_file:
-    #   - .env
+    container_name: cpa-plus
     environment:
       DEPLOY: ${DEPLOY:-}
     ports:
-      - "8317:8317"
-      - "8085:8085"
-      - "1455:1455"
-      - "54545:54545"
-      - "51121:51121"
-      - "11451:11451"
+      - "${CPA_PORT:-8317}:8317"
     volumes:
-      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ${CPA_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CPA_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CPA_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - cpa-data:/CLIProxyAPI/data
     restart: unless-stopped
+
+volumes:
+  cpa-data:
