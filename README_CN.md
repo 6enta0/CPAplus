@@ -38,7 +38,7 @@
 
 ### 3. Codex 额度管理与凭证控制
 
-**痛点**：原项目无法查看 Codex 账户额度使用情况。用户需要额外运行 Python 服务来查询额度和刷新凭证，操作繁琐且需要同时维护两个进程。
+**痛点**：原项目不方便集中查看 Codex 账户额度使用情况。
 
 **变更**：
 - 新增 `internal/codex/quota.go` — OAuth token 刷新（复用 `internal/auth/codex` 包）、通过 OpenAI usage API 查询额度、自动停用/启用逻辑、额度数据持久化到 auth file

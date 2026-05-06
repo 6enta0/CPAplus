@@ -38,7 +38,7 @@ Modified from:
 
 ### 3. Codex Quota Management & Credential Control
 
-**Pain point**: The original project had no visibility into Codex account quota usage. Users had to run a separate Python service to check quotas and refresh tokens, which was cumbersome and required maintaining two processes.
+**Pain point**: The original project made it inconvenient to centrally check Codex account quota usage.
 
 **Changes**:
 - Added `internal/codex/quota.go` — OAuth token refresh (reusing `internal/auth/codex` package), quota querying via OpenAI usage API, auto-disable/enable logic, quota data persistence to auth files
