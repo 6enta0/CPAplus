@@ -56,14 +56,17 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 
 **変更点**：
 - `internal/pricing/`パッケージを追加 — 起動時および72時間ごとに[LitellM](https://github.com/BerriAI/litellm)からモデル価格を同期（価格アプローチは[agent-usage](https://github.com/briqt/agent-usage)を参照）
-- カスタム価格（MiMoモデルなど）はハードコードされ、LiteLLM同期で上書きされない
+- カスタム価格（MiMoモデルなど）はAPIで管理され、LiteLLM同期で上書きされない
 - 価格検索のためのファジーモデル名マッチング（プレフィックス除去、部分文字列包含）
 - `usage_records`テーブルに`cost_usd`列を追加 — 挿入時にinput/output/cacheトークン価格から自動計算
 - `CalcCost()`はキャッシュトークンを個別に処理（キャッシュ読み取り価格 vs. 入力価格）
+- 旧データのインポート時（`cost_usd`なし）、pricing storeが自動的に価格を補完計算
+- 大量データセットのバッチインポート（>1000件は1000件ずつ分割）、単一通知でリアルタイム進捗表示
 - 管理APIエンドポイントを追加：
   - `GET /v0/management/pricing` — 全価格（LiteLLM + カスタム）をフロントエンド向け形式で返す
   - `POST /v0/management/pricing/sync` — 手動価格同期トリガー
-- フロントエンド：価格をバックエンドAPIから取得（localStorageにフォールバック）、auth fileリストビューに「合計コスト」列を追加、使用統計にコストデータを統合
+  - `PUT /v0/management/pricing/custom` — カスタムモデル価格を保存（永続化、LiteLLM同期で上書きされない）
+- フロントエンド：価格設定カードがバックエンドAPIでカスタム価格を読み書き（localStorageに依存しない）、auth fileリストビューに「合計コスト」列を追加、使用統計にコストデータを統合
 
 ### 5. 認証ファイルリストビューと拡張テーブル
 

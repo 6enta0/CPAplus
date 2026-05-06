@@ -56,14 +56,17 @@ Modified from:
 
 **Changes**:
 - Added `internal/pricing/` package — syncs model prices from [LiteLLM](https://github.com/BerriAI/litellm) on startup and every 72 hours (pricing approach referenced from [agent-usage](https://github.com/briqt/agent-usage))
-- Custom prices (e.g., MiMo models) are hardcoded and never overwritten by LiteLLM sync
+- Custom prices (e.g., MiMo models) are managed via API and never overwritten by LiteLLM sync
 - Fuzzy model name matching (prefix stripping, substring containment) for price lookup
 - `usage_records` table now includes `cost_usd` column — calculated at insertion time using input/output/cache token prices
 - `CalcCost()` handles cached tokens separately (cache read price vs. input price)
+- Imported legacy data (without `cost_usd`) is automatically priced by the pricing store on import
+- Batch import with progress notification for large datasets (>1000 records are split into batches of 1000)
 - Added management API endpoints:
   - `GET /v0/management/pricing` — returns all prices (LiteLLM + custom) in frontend-friendly format
   - `POST /v0/management/pricing/sync` — manual trigger for price sync
-- Frontend: Prices fetched from backend API (fallback to localStorage), "Total Cost" column in auth file list view, cost integration in usage statistics
+  - `PUT /v0/management/pricing/custom` — save custom model prices (persisted, survives LiteLLM sync)
+- Frontend: Price settings card reads/writes custom prices via backend API (no longer localStorage-dependent), "Total Cost" column in auth file list view, cost integration in usage statistics
 
 ### 5. Auth File List View & Enhanced Table
 

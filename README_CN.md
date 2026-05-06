@@ -56,14 +56,17 @@
 
 **变更**：
 - 新增 `internal/pricing/` 包 — 启动时及每 72 小时从 [LiteLLM](https://github.com/BerriAI/litellm) 同步模型价格（定价方案参考 [agent-usage](https://github.com/briqt/agent-usage)）
-- 自定义价格（如 MiMo 模型）硬编码存储，不会被 LiteLLM 同步覆盖
+- 自定义价格（如 MiMo 模型）通过 API 管理，不会被 LiteLLM 同步覆盖
 - 模糊模型名匹配（前缀剥离、子串包含）用于价格查找
 - `usage_records` 表新增 `cost_usd` 列 — 插入时根据 input/output/cache token 价格自动计算
 - `CalcCost()` 分别处理缓存 token（缓存读取价格 vs. 输入价格）
+- 导入旧版数据（无 `cost_usd`）时，pricing store 自动补算价格
+- 大数据集分批导入（>1000 条按每 1000 条拆分），单条通知实时更新进度
 - 新增管理 API 端点：
   - `GET /v0/management/pricing` — 返回所有价格（LiteLLM + 自定义），前端友好格式
   - `POST /v0/management/pricing/sync` — 手动触发价格同步
-- 前端：价格从后端 API 获取（fallback 到 localStorage），auth file 列表视图新增"总消费"列，使用统计集成花费数据
+  - `PUT /v0/management/pricing/custom` — 保存自定义模型价格（持久化，不被 LiteLLM 同步覆盖）
+- 前端：价格设置卡片通过后端 API 读写自定义价格（不再依赖 localStorage），auth file 列表视图新增"总消费"列，使用统计集成花费数据
 
 ### 5. 认证文件列表视图与增强表格
 
