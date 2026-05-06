@@ -657,6 +657,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files/refresh-token", s.mgmt.PostRefreshToken)
 		mgmt.GET("/pricing", s.mgmt.GetPricing)
 		mgmt.POST("/pricing/sync", s.mgmt.SyncPricing)
+		mgmt.PUT("/pricing/custom", s.mgmt.PutCustomPricing)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)

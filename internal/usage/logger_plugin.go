@@ -57,10 +57,15 @@ type RequestStatistics struct {
 	tokensByHour   map[int]int64
 
 	pricingStore *pricing.Store
+	sqliteStore  *SQLiteStore
 }
 
 func (s *RequestStatistics) SetPricingStore(ps *pricing.Store) {
 	s.pricingStore = ps
+}
+
+func (s *RequestStatistics) SetSQLiteStore(ss *SQLiteStore) {
+	s.sqliteStore = ss
 }
 
 func (s *RequestStatistics) GetPricingStore() *pricing.Store {
@@ -360,6 +365,25 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	if s.sqliteStore != nil {
+		s.sqliteStore.InsertRecord(coreusage.Record{
+			RequestedAt: detail.Timestamp,
+			APIKey:      apiName,
+			Source:      detail.Source,
+			AuthIndex:   detail.AuthIndex,
+			Model:       modelName,
+			Detail: coreusage.Detail{
+				InputTokens:     detail.Tokens.InputTokens,
+				OutputTokens:    detail.Tokens.OutputTokens,
+				CachedTokens:    detail.Tokens.CachedTokens,
+				ReasoningTokens: detail.Tokens.ReasoningTokens,
+				TotalTokens:     detail.Tokens.TotalTokens,
+			},
+			Latency: time.Duration(detail.LatencyMs) * time.Millisecond,
+			Failed:  detail.Failed,
+		})
+	}
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {

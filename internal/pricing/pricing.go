@@ -138,6 +138,38 @@ func (s *Store) FrontendPrices() map[string]struct {
 	return result
 }
 
+func (s *Store) CustomPricesFrontend() map[string]struct {
+	Prompt     float64 `json:"prompt"`
+	Completion float64 `json:"completion"`
+	Cache      float64 `json:"cache"`
+} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]struct {
+		Prompt     float64 `json:"prompt"`
+		Completion float64 `json:"completion"`
+		Cache      float64 `json:"cache"`
+	}, len(s.customPrices))
+	for model, p := range s.customPrices {
+		result[model] = struct {
+			Prompt     float64 `json:"prompt"`
+			Completion float64 `json:"completion"`
+			Cache      float64 `json:"cache"`
+		}{
+			Prompt:     p[0] * 1e6,
+			Completion: p[1] * 1e6,
+			Cache:      p[2] * 1e6,
+		}
+	}
+	return result
+}
+
+func (s *Store) SetCustomPrices(prices map[string][4]float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.customPrices = prices
+}
+
 func CalcCost(inputTokens, outputTokens, cachedTokens int64, prices [4]float64) float64 {
 	nonCached := float64(inputTokens-cachedTokens) * prices[0]
 	cacheCost := float64(cachedTokens) * prices[2]
