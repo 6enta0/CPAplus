@@ -397,6 +397,11 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 				entry["last_used_at"] = t
 			}
 		}
+		if costs, err := h.usageStore.GetCostByAuthIndex(); err == nil {
+			if cost, ok := costs[auth.Index]; ok {
+				entry["total_cost_usd"] = cost
+			}
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email

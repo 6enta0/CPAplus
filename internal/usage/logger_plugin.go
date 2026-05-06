@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/pricing"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -54,6 +55,16 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	pricingStore *pricing.Store
+}
+
+func (s *RequestStatistics) SetPricingStore(ps *pricing.Store) {
+	s.pricingStore = ps
+}
+
+func (s *RequestStatistics) GetPricingStore() *pricing.Store {
+	return s.pricingStore
 }
 
 type apiStats struct {
@@ -75,6 +86,7 @@ type RequestDetail struct {
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
+	CostUSD   float64    `json:"cost_usd"`
 }
 
 type TokenStats struct {

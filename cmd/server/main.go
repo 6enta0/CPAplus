@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
@@ -585,11 +586,19 @@ func main() {
 				if errInitUsage != nil {
 					log.WithError(errInitUsage).Warn("usage: sqlite persistence init failed")
 				}
-				defer func() {
-					if sqliteStore != nil {
-						_ = sqliteStore.Close()
+				if sqliteStore != nil {
+					pricingStore := pricing.NewStore()
+					if err := pricingStore.Sync(); err != nil {
+						log.WithError(err).Warn("pricing: initial sync failed")
+					} else {
+						sqliteStore.SetPricingStore(pricingStore)
+						usage.GetRequestStatistics().SetPricingStore(pricingStore)
+						_ = pricing.StartSyncLoop(pricingStore, 72*time.Hour)
 					}
-				}()
+					defer func() {
+						_ = sqliteStore.Close()
+					}()
+				}
 			}
 			cmd.StartService(cfg, configFilePath, password)
 		}
