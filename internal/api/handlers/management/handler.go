@@ -48,6 +48,7 @@ type Handler struct {
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
 	usageStats          *usage.RequestStatistics
+	usageStore          *usage.SQLiteStore
 }
 
 // NewHandler creates a new management handler instance.
@@ -101,6 +102,10 @@ func (h *Handler) purgeStaleAttempts() {
 // NewHandler creates a new management handler instance.
 func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manager) *Handler {
 	return NewHandler(cfg, "", manager)
+}
+
+func (h *Handler) SetUsageStore(store *usage.SQLiteStore) {
+	h.usageStore = store
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.

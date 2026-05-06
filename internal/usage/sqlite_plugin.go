@@ -28,6 +28,8 @@ func (p *SQLitePlugin) HandleUsage(_ context.Context, record coreusage.Record) {
 	p.store.InsertRecord(record)
 }
 
+var globalSQLiteStore *SQLiteStore
+
 func InitSQLitePersistence(dbPath string) (*SQLiteStore, error) {
 	store, err := NewSQLiteStore(dbPath)
 	if err != nil {
@@ -37,6 +39,8 @@ func InitSQLitePersistence(dbPath string) (*SQLiteStore, error) {
 	if store == nil {
 		return nil, nil
 	}
+
+	globalSQLiteStore = store
 
 	if errLoad := LoadFromSQLite(defaultRequestStatistics, store); errLoad != nil {
 		log.WithError(errLoad).Warn("usage: failed to load historical records from sqlite")
@@ -50,3 +54,5 @@ func InitSQLitePersistence(dbPath string) (*SQLiteStore, error) {
 
 	return store, nil
 }
+
+func GetSQLiteStore() *SQLiteStore { return globalSQLiteStore }

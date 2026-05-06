@@ -15,7 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const usageSchemaVersion = 2
+const usageSchemaVersion = 3
 
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS usage_records (
 CREATE INDEX IF NOT EXISTS idx_usage_records_timestamp ON usage_records(timestamp);
 CREATE INDEX IF NOT EXISTS idx_usage_records_api_key  ON usage_records(api_key);
 CREATE INDEX IF NOT EXISTS idx_usage_records_model     ON usage_records(model);
+CREATE TABLE IF NOT EXISTS auth_last_used (
+	auth_index    TEXT PRIMARY KEY,
+	last_called_at TEXT NOT NULL
+);
 `
 
 type SQLiteStore struct {
@@ -151,6 +155,34 @@ func (s *SQLiteStore) InsertRecord(record coreusage.Record) {
 	if err != nil {
 		log.WithError(err).Warn("usage db: failed to insert record")
 	}
+
+	if authIdx := record.AuthIndex; authIdx != "" {
+		_, _ = s.db.Exec(
+			`INSERT INTO auth_last_used (auth_index, last_called_at) VALUES (?, ?)
+			 ON CONFLICT(auth_index) DO UPDATE SET last_called_at = excluded.last_called_at`,
+			authIdx, timestamp.UTC().Format(time.RFC3339),
+		)
+	}
+}
+
+func (s *SQLiteStore) GetLastCalledAt() (map[string]string, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT auth_index, last_called_at FROM auth_last_used`)
+	if err != nil {
+		return nil, fmt.Errorf("usage db: query auth_last_used failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	result := make(map[string]string)
+	for rows.Next() {
+		var authIdx, lastCalled string
+		if err := rows.Scan(&authIdx, &lastCalled); err != nil {
+			return nil, fmt.Errorf("usage db: scan auth_last_used failed: %w", err)
+		}
+		result[authIdx] = lastCalled
+	}
+	return result, rows.Err()
 }
 
 func (s *SQLiteStore) LoadAll() ([]loadedRecord, error) {

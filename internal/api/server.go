@@ -284,6 +284,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
 	s.mgmt.SetUsageStatistics(usage.GetRequestStatistics())
+	s.mgmt.SetUsageStore(usage.GetSQLiteStore())
 	s.localPassword = optionState.localPassword
 
 	// Setup routes
