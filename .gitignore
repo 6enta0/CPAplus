@@ -4,6 +4,7 @@ cli-proxy-api
 
 # Configuration
 config.yaml
+test-config.yaml
 .env
 
 # Generated content
@@ -12,6 +13,9 @@ logs/*
 conv/*
 temp/*
 refs/*
+usage.db
+usage.db-shm
+usage.db-wal
 
 # Storage backends
 pgstore/*
@@ -46,6 +50,10 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.github/copilot/
+.github/hooks/
+.github/prompts/
+.trellis/
 
 # macOS
 .DS_Store
