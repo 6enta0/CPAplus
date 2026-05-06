@@ -94,6 +94,7 @@
 ### 方式一：Docker 部署（无需 Clone）
 
 最简单的方式——无需安装 Go 或 Node.js。
+该方式使用预构建镜像 `ghcr.io/6enta0/cpaplus:latest`。
 
 ```bash
 # 1. 创建工作目录
@@ -115,6 +116,8 @@ docker compose up -d
 # 5. 打开管理面板
 # http://localhost:8317/management.html
 ```
+
+如果 `docker compose up -d` 拉取 `ghcr.io/6enta0/cpaplus:latest` 时提示 `unauthorized`，说明 GHCR Package 可能仍是 private，需要在 GitHub Package 页面将其可见性改为 public。
 
 ### 方式二：Go 直接运行（Clone 后运行）
 

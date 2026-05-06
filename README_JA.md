@@ -94,6 +94,7 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 ### 方法1：Dockerデプロイ（Clone不要）
 
 最も簡単な方法—GoやNode.jsのインストール不要。
+この方法は事前ビルド済みイメージ `ghcr.io/6enta0/cpaplus:latest` を使用します。
 
 ```bash
 # 1. 作業ディレクトリを作成
@@ -115,6 +116,8 @@ docker compose up -d
 # 5. 管理ダッシュボードを開く
 # http://localhost:8317/management.html
 ```
+
+`docker compose up -d` で `ghcr.io/6enta0/cpaplus:latest` の取得時に `unauthorized` が表示される場合、GHCR Package がまだ private の可能性があります。GitHub Package ページで可視性を public に変更してください。
 
 ### 方法2：Goで直接実行（Cloneして実行）
 

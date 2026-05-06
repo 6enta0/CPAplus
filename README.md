@@ -94,6 +94,7 @@ Modified from:
 ### Option 1: Docker (No Clone Required)
 
 The easiest way — no Go or Node.js installation needed.
+It uses the prebuilt image `ghcr.io/6enta0/cpaplus:latest`.
 
 ```bash
 # 1. Create a working directory
@@ -115,6 +116,8 @@ docker compose up -d
 # 5. Open management dashboard
 # http://localhost:8317/management.html
 ```
+
+If `docker compose up -d` reports `unauthorized` when pulling `ghcr.io/6enta0/cpaplus:latest`, the GHCR package may still be private. Open the package page and set visibility to public.
 
 ### Option 2: Go Run (Clone & Run)
 

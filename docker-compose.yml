@@ -1,6 +1,6 @@
 services:
   cpa-plus:
-    image: ${CPA_PLUS_IMAGE:-6enta0/cpaplus:latest}
+    image: ${CPA_PLUS_IMAGE:-ghcr.io/6enta0/cpaplus:latest}
     pull_policy: always
     container_name: cpa-plus
     environment:
