@@ -36,10 +36,55 @@ Modified from:
 - Frontend fetches OpenAI compatibility data from the dedicated `/openai-compatibility` API (which includes `auth-index`) instead of `/config` (which does not)
 - SQLite usage store now has schema versioning — when schema version mismatches, tables are automatically rebuilt
 
-### 3. Other Improvements
+### 3. Codex Quota Management & Credential Control
 
-- Schema version tracking in SQLite usage store prevents data corruption when schema changes
-- Tests for auth index differentiation and file-based auth stability
+**Pain point**: The original project had no visibility into Codex account quota usage. Users had to run a separate Python service to check quotas and refresh tokens, which was cumbersome and required maintaining two processes.
+
+**Changes**:
+- Added `internal/codex/quota.go` — OAuth token refresh (reusing `internal/auth/codex` package), quota querying via OpenAI usage API, auto-disable/enable logic, quota data persistence to auth files
+- Added management API endpoints:
+  - `POST /v0/management/auth-files/quota-check` — batch quota check + token refresh + auto-disable/enable
+  - `POST /v0/management/auth-files/refresh-token` — batch token refresh
+- Quota fields written to auth JSON files: `quota_plan_type`, `quota_windows` (with usedPercent, resetAtIso), `quota_checked_at`, `quota_error`
+- Auto-disable: when quota reaches 100%, the auth file is disabled automatically; re-enabled when quota resets
+- Frontend: Quota display per auth file card with plan type badge, usage bars, and reset countdown
+- Auth file list now reads quota fields from disk on page load (no manual check required for display)
+
+### 4. Model Pricing & Cost Tracking
+
+**Pain point**: There was no way to track how much each API call costs. Users had to manually look up model prices and calculate expenses themselves.
+
+**Changes**:
+- Added `internal/pricing/` package — syncs model prices from [LiteLLM](https://github.com/BerriAI/litellm) on startup and every 72 hours (pricing approach referenced from [agent-usage](https://github.com/briqt/agent-usage))
+- Custom prices (e.g., MiMo models) are hardcoded and never overwritten by LiteLLM sync
+- Fuzzy model name matching (prefix stripping, substring containment) for price lookup
+- `usage_records` table now includes `cost_usd` column — calculated at insertion time using input/output/cache token prices
+- `CalcCost()` handles cached tokens separately (cache read price vs. input price)
+- Added management API endpoints:
+  - `GET /v0/management/pricing` — returns all prices (LiteLLM + custom) in frontend-friendly format
+  - `POST /v0/management/pricing/sync` — manual trigger for price sync
+- Frontend: Prices fetched from backend API (fallback to localStorage), "Total Cost" column in auth file list view, cost integration in usage statistics
+
+### 5. Auth File List View & Enhanced Table
+
+**Pain point**: The card-only view didn't scale well when managing many auth files. Key metrics like quota status, last call time, and cost required clicking into individual cards.
+
+**Changes**:
+- Added table/list view for auth files (togglable, default view)
+- Columns: Name, Last Call, Status, Success, Failure, Plan Type (badge), Used Quota (progress bar + %), Total Cost, Actions, Quota Checked, Quota Reset (countdown)
+- Sortable headers for all columns
+- Time columns show date + relative time (two-line display)
+- Quota bar color-coded: green (<60%), orange (60-90%), red (≥90%)
+- Plan type badges: free (green), plus (blue), team (orange), pro (red)
+- Batch and per-row action buttons: Check Quota, Refresh Token, Enable/Disable, Download, Delete
+
+### 6. Other Improvements
+
+- `last_called_at` persisted per auth index in `usage_records`, survives restarts
+- `total_cost_usd` aggregated per auth index via SQL query
+- Schema version tracking in SQLite usage store prevents data corruption
+- Frontend: usage statistics page layout reordered (request events above charts)
+- Frontend: control panel layout improvements (display options in one row, responsive widths)
 
 ## Quick Start
 

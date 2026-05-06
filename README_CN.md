@@ -36,10 +36,55 @@
 - 前端从独立的 `/openai-compatibility` API（包含 `auth-index`）获取数据，而非 `/config`（不包含）
 - SQLite 使用统计存储新增 schema 版本管理 — 版本不匹配时自动重建表
 
-### 3. 其他改进
+### 3. Codex 额度管理与凭证控制
 
-- SQLite 使用统计存储的 schema 版本追踪，防止 schema 变更时数据损坏
-- 新增 auth index 前缀区分和文件型 auth 稳定性的单元测试
+**痛点**：原项目无法查看 Codex 账户额度使用情况。用户需要额外运行 Python 服务来查询额度和刷新凭证，操作繁琐且需要同时维护两个进程。
+
+**变更**：
+- 新增 `internal/codex/quota.go` — OAuth token 刷新（复用 `internal/auth/codex` 包）、通过 OpenAI usage API 查询额度、自动停用/启用逻辑、额度数据持久化到 auth file
+- 新增管理 API 端点：
+  - `POST /v0/management/auth-files/quota-check` — 批量额度查询 + token 刷新 + 自动停用/启用
+  - `POST /v0/management/auth-files/refresh-token` — 批量 token 刷新
+- 额度字段写入 auth JSON 文件：`quota_plan_type`、`quota_windows`（含 usedPercent、resetAtIso）、`quota_checked_at`、`quota_error`
+- 自动停用：额度达 100% 时自动停用 auth file；额度重置后自动重新启用
+- 前端：每个 auth file 卡片显示 plan type 徽章、用量进度条和重置倒计时
+- 页面加载时从磁盘读取额度字段（无需手动查询即可显示）
+
+### 4. 模型定价与花费追踪
+
+**痛点**：无法追踪每次 API 调用的花费。用户需要手动查找模型价格并自行计算费用。
+
+**变更**：
+- 新增 `internal/pricing/` 包 — 启动时及每 72 小时从 [LiteLLM](https://github.com/BerriAI/litellm) 同步模型价格（定价方案参考 [agent-usage](https://github.com/briqt/agent-usage)）
+- 自定义价格（如 MiMo 模型）硬编码存储，不会被 LiteLLM 同步覆盖
+- 模糊模型名匹配（前缀剥离、子串包含）用于价格查找
+- `usage_records` 表新增 `cost_usd` 列 — 插入时根据 input/output/cache token 价格自动计算
+- `CalcCost()` 分别处理缓存 token（缓存读取价格 vs. 输入价格）
+- 新增管理 API 端点：
+  - `GET /v0/management/pricing` — 返回所有价格（LiteLLM + 自定义），前端友好格式
+  - `POST /v0/management/pricing/sync` — 手动触发价格同步
+- 前端：价格从后端 API 获取（fallback 到 localStorage），auth file 列表视图新增"总消费"列，使用统计集成花费数据
+
+### 5. 认证文件列表视图与增强表格
+
+**痛点**：纯卡片视图在管理大量 auth file 时不够高效。额度状态、上次调用时间、花费等关键指标需要逐一点开卡片才能查看。
+
+**变更**：
+- 新增表格/列表视图（可切换，默认视图）
+- 列：名称、上次调用、状态、成功、失败、类型（徽章）、已用额度（进度条+%）、总消费、操作、额度检查于、重置倒计时
+- 所有列支持排序
+- 时间列显示日期 + 相对时间（两行显示）
+- 额度进度条颜色编码：绿色（<60%）、橙色（60-90%）、红色（≥90%）
+- Plan type 徽章：free（绿色）、plus（蓝色）、team（橙色）、pro（红色）
+- 批量和逐行操作按钮：额度查询、刷新凭证、启用/停用、下载、删除
+
+### 6. 其他改进
+
+- `last_called_at` 按 auth index 持久化到 `usage_records`，重启后数据不丢失
+- `total_cost_usd` 通过 SQL 聚合查询按 auth index 统计
+- SQLite 使用统计存储 schema 版本追踪，防止 schema 变更时数据损坏
+- 前端：使用统计页面布局调整（请求事件明细移至图表上方）
+- 前端：控制面板布局优化（显示选项横向排列、响应式宽度）
 
 ## 快速开始
 
