@@ -24,6 +24,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -2157,6 +2158,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
+							if shouldDisableCodexAuthForUsageLimit(auth, result.Error) {
+								applyPermanentUsageLimitDisable(auth, result.Error, now)
+								state.Status = StatusDisabled
+								state.StatusMessage = auth.StatusMessage
+								state.NextRetryAfter = time.Time{}
+								state.Quota.NextRecoverAt = time.Time{}
+								shouldSuspendModel = false
+								setModelQuota = false
+							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -2169,7 +2179,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
-					auth.Status = StatusError
+					if auth.Status != StatusDisabled {
+						auth.Status = StatusError
+					}
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
 				}
@@ -2575,6 +2587,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
+		if shouldDisableCodexAuthForUsageLimit(auth, resultErr) {
+			applyPermanentUsageLimitDisable(auth, resultErr, now)
+		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
@@ -2586,6 +2601,42 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
+	}
+}
+
+func shouldDisableCodexAuthForUsageLimit(auth *Auth, resultErr *Error) bool {
+	if auth == nil || resultErr == nil {
+		return false
+	}
+	if statusCodeFromResult(resultErr) != http.StatusTooManyRequests {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if strings.TrimSpace(auth.FileName) == "" || auth.Metadata == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(gjson.Get(resultErr.Message, "error.type").String()), "usage_limit_reached")
+}
+
+func applyPermanentUsageLimitDisable(auth *Auth, resultErr *Error, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = true
+	auth.Unavailable = false
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "usage limit reached"
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota.NextRecoverAt = time.Time{}
+	auth.UpdatedAt = now
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = true
+	if resultErr != nil && strings.TrimSpace(resultErr.Message) != "" {
+		auth.Metadata["quota_error"] = resultErr.Message
 	}
 }
 

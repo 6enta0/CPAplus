@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
 	"testing"
@@ -250,6 +251,34 @@ func (e *retryAfterStatusError) RetryAfter() *time.Duration {
 	}
 	d := e.retryAfter
 	return &d
+}
+
+type captureStore struct {
+	mu   sync.Mutex
+	last *Auth
+}
+
+func (s *captureStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *captureStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.last = auth.Clone()
+	return auth.ID, nil
+}
+
+func (s *captureStore) Delete(context.Context, string) error { return nil }
+
+func (s *captureStore) Last() *Auth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last == nil {
+		return nil
+	}
+	return s.last.Clone()
 }
 
 func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
@@ -687,6 +716,96 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *tes
 	}
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReached(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"auth-codex-usage-limit": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    `{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":60}}`,
+				retryAfter: 60 * time.Second,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-codex-usage-limit",
+		Provider: "codex",
+		FileName: "codex-auth.json",
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-codex-usage-limit"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusTooManyRequests {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusTooManyRequests)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled")
+	}
+	if updated.Status != StatusDisabled {
+		t.Fatalf("status = %v, want %v", updated.Status, StatusDisabled)
+	}
+	if got := updated.StatusMessage; got != "usage limit reached" {
+		t.Fatalf("status message = %q, want %q", got, "usage limit reached")
+	}
+	if got, _ := updated.Metadata["disabled"].(bool); !got {
+		t.Fatalf("expected metadata disabled=true, got %#v", updated.Metadata["disabled"])
+	}
+	if got, _ := updated.Metadata["quota_error"].(string); got == "" {
+		t.Fatalf("expected quota_error to be populated")
+	} else {
+		var payload struct {
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(got), &payload); err != nil {
+			t.Fatalf("quota_error is not valid json: %v", err)
+		}
+		if payload.Error.Type != "usage_limit_reached" {
+			t.Fatalf("quota_error type = %q, want %q", payload.Error.Type, "usage_limit_reached")
+		}
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be zero, got %v", updated.NextRetryAfter)
+	}
+	if !updated.Quota.NextRecoverAt.IsZero() {
+		t.Fatalf("expected NextRecoverAt to be zero, got %v", updated.Quota.NextRecoverAt)
+	}
+
+	persisted := store.Last()
+	if persisted == nil {
+		t.Fatalf("expected persisted auth snapshot")
+	}
+	if !persisted.Disabled {
+		t.Fatalf("expected persisted auth to be disabled")
+	}
+	if got, _ := persisted.Metadata["disabled"].(bool); !got {
+		t.Fatalf("expected persisted metadata disabled=true, got %#v", persisted.Metadata["disabled"])
 	}
 }
 
