@@ -16,6 +16,12 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
+## Git Workflow
+- Prefer a feature branch for code, UI, backend, or other multi-file changes
+- Small documentation-only or low-risk config-only changes may go directly to `main`
+- If unsure, create a branch first instead of working on `main`
+- Do not push directly to `main` unless the user explicitly asks or the change is clearly trivial
+
 ## Management Frontend
 - Frontend source lives in `~/projects/github_repos/Cli-Proxy-API-Management-Center`
 - When changing the management UI, run `npm run build` in that repo, then copy `dist/index.html` to `static/management.html` in this repo
