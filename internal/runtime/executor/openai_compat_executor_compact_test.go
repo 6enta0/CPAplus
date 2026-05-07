@@ -7,13 +7,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+type usagePluginFunc func(context.Context, coreusage.Record)
+
+func (fn usagePluginFunc) HandleUsage(ctx context.Context, record coreusage.Record) {
+	fn(ctx, record)
+}
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	var gotPath string
@@ -177,5 +185,62 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	}
 	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
+	}
+}
+
+func TestOpenAICompatExecutorStreamPublishesLastUsageChunk(t *testing.T) {
+	recordCh := make(chan coreusage.Record, 1)
+	coreusage.RegisterPlugin(usagePluginFunc(func(_ context.Context, record coreusage.Record) {
+		if record.Model != "stream-model" {
+			return
+		}
+		select {
+		case recordCh <- record:
+		default:
+		}
+	}))
+	coreusage.StartDefault(context.Background())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"O\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"K\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "stream-model",
+		Payload: []byte(`{"model":"stream-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+	}
+
+	var record coreusage.Record
+	select {
+	case record = <-recordCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+	if got := record.Detail.OutputTokens; got != 2 {
+		t.Fatalf("output tokens = %d, want 2", got)
+	}
+	if got := record.Detail.TotalTokens; got != 12 {
+		t.Fatalf("total tokens = %d, want 12", got)
 	}
 }

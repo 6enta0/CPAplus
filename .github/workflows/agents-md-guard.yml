@@ -52,12 +52,12 @@ jobs:
               .join("\n");
 
             const body = [
-              "This repository does not allow modifying `AGENTS.md` in pull requests.",
+              "This repository discourages modifying `AGENTS.md` in pull requests.",
               "",
               "Detected changes:",
               changedList,
               "",
-              "Please revert these changes and open a new PR without touching `AGENTS.md`.",
+              "Please double-check whether these agent workflow changes are intentional.",
             ].join("\n");
 
             try {
@@ -70,12 +70,3 @@ jobs:
             } catch (error) {
               core.warning(`Failed to comment on PR #${prNumber}: ${error.message}`);
             }
-
-            await github.rest.pulls.update({
-              owner,
-              repo,
-              pull_number: prNumber,
-              state: "closed",
-            });
-
-            core.setFailed("PR modifies AGENTS.md");

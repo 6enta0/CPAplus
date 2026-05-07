@@ -16,6 +16,12 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
+## Management Frontend
+- Frontend source lives in `~/projects/github_repos/Cli-Proxy-API-Management-Center`
+- When changing the management UI, run `npm run build` in that repo, then copy `dist/index.html` to `static/management.html` in this repo
+- Frontend-only `static/management.html` changes do not require restarting the Go server; hard-refresh the browser instead
+- When serving a custom management panel, keep `remote-management.disable-auto-update-panel=true` so the official panel updater does not overwrite it
+
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory

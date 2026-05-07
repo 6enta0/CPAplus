@@ -139,6 +139,21 @@ go run ./cmd/server --config config.yaml
 # http://localhost:8317/management.html
 ```
 
+如果你只是运行服务，仓库内自带的 `static/management.html` 已经够用。
+
+如果你修改了管理前端，需要到独立的前端仓库重新构建，然后把生成结果拷回 CPAplus：
+
+```bash
+# 在独立前端仓库中构建管理面板
+cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+npm run build
+
+# 将生成结果拷回 CPAplus
+cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+```
+
+替换 `static/management.html` 后，浏览器强制刷新即可。此类纯前端改动不需要重启 Go 服务。
+
 ### 方式三：从源码构建 Docker 镜像
 
 适合想自定义并构建自己镜像的开发者。
