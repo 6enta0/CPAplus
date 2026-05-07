@@ -819,6 +819,113 @@ func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReached(t *testing.T) 
 	}
 }
 
+func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReachedWrappedPayload(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"auth-codex-usage-limit": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    `upstream request failed: {"status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":60}},"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":60}}`,
+				retryAfter: 60 * time.Second,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-codex-usage-limit",
+		Provider: "codex",
+		FileName: "codex-auth.json",
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-codex-usage-limit"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled")
+	}
+	if got, _ := updated.Metadata["disabled"].(bool); !got {
+		t.Fatalf("expected metadata disabled=true, got %#v", updated.Metadata["disabled"])
+	}
+	if got := fmt.Sprintf("%v", updated.Metadata[quotaAutoReenableReasonKey]); got != quotaAutoReenableReason {
+		t.Fatalf("quota auto re-enable reason = %q, want %q", got, quotaAutoReenableReason)
+	}
+	if persisted := store.Last(); persisted == nil || !persisted.Disabled {
+		t.Fatalf("expected persisted disabled auth, got %#v", persisted)
+	}
+}
+
+func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReachedFromBodyErrorType(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			"auth-codex-usage-limit": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    `{"status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":45}}}`,
+				retryAfter: 45 * time.Second,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-codex-usage-limit",
+		Provider: "codex",
+		FileName: "codex-auth.json",
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-codex-usage-limit"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled")
+	}
+	if got := fmt.Sprintf("%v", updated.Metadata[quotaAutoReenableReasonKey]); got != quotaAutoReenableReason {
+		t.Fatalf("quota auto re-enable reason = %q, want %q", got, quotaAutoReenableReason)
+	}
+	if persisted := store.Last(); persisted == nil || !persisted.Disabled {
+		t.Fatalf("expected persisted disabled auth, got %#v", persisted)
+	}
+}
+
 func TestManager_RefreshCodexUsageLimitedAuth_AutoEnablesWhenQuotaRecovers(t *testing.T) {
 	prevCheckQuota := checkCodexQuotaForFile
 	t.Cleanup(func() {

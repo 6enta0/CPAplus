@@ -2627,7 +2627,44 @@ func shouldDisableCodexAuthForUsageLimit(auth *Auth, resultErr *Error) bool {
 	if strings.TrimSpace(auth.FileName) == "" || auth.Metadata == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(gjson.Get(resultErr.Message, "error.type").String()), "usage_limit_reached")
+	return isUsageLimitReachedPayload(resultErr)
+}
+
+func isUsageLimitReachedPayload(resultErr *Error) bool {
+	if resultErr == nil {
+		return false
+	}
+	for _, candidate := range usageLimitErrorCandidates(resultErr) {
+		if strings.EqualFold(candidate, "usage_limit_reached") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(resultErr.Message)), "usage_limit_reached")
+}
+
+func usageLimitErrorCandidates(resultErr *Error) []string {
+	if resultErr == nil {
+		return nil
+	}
+	message := strings.TrimSpace(resultErr.Message)
+	if message == "" {
+		return nil
+	}
+	paths := []string{
+		"error.type",
+		"error.code",
+		"body.error.type",
+		"body.error.code",
+		"type",
+		"code",
+	}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if value := strings.TrimSpace(gjson.Get(message, path).String()); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func applyPermanentUsageLimitDisable(auth *Auth, resultErr *Error, now time.Time) {
@@ -2658,14 +2695,19 @@ func quotaAutoReenableAtFromUsageLimitError(resultErr *Error, now time.Time) tim
 	if resultErr == nil {
 		return time.Time{}
 	}
-	if resetAt := strings.TrimSpace(gjson.Get(resultErr.Message, "error.resets_at").String()); resetAt != "" {
-		if parsed, ok := parseTimeValue(resetAt); ok && parsed.After(now) {
-			return parsed
+	message := strings.TrimSpace(resultErr.Message)
+	for _, path := range []string{"error.resets_at", "body.error.resets_at", "resets_at"} {
+		if resetAt := strings.TrimSpace(gjson.Get(message, path).String()); resetAt != "" {
+			if parsed, ok := parseTimeValue(resetAt); ok && parsed.After(now) {
+				return parsed
+			}
 		}
 	}
-	if resetSeconds := gjson.Get(resultErr.Message, "error.resets_in_seconds"); resetSeconds.Exists() {
-		if secs := parseDurationValue(resetSeconds.Value()); secs > 0 {
-			return now.Add(secs)
+	for _, path := range []string{"error.resets_in_seconds", "body.error.resets_in_seconds", "resets_in_seconds"} {
+		if resetSeconds := gjson.Get(message, path); resetSeconds.Exists() {
+			if secs := parseDurationValue(resetSeconds.Value()); secs > 0 {
+				return now.Add(secs)
+			}
 		}
 	}
 	if resultErr.HTTPStatus == http.StatusTooManyRequests {
