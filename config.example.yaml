@@ -64,6 +64,10 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: true
 
+# SQLite database path for persisted usage statistics and pricing data.
+# Relative paths are resolved from the active config file directory.
+usage-db-path: "./data/usage.db"
+
 # How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60

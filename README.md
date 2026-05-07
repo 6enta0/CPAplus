@@ -139,6 +139,21 @@ go run ./cmd/server --config config.yaml
 # http://localhost:8317/management.html
 ```
 
+If you only want to run the server, the bundled `static/management.html` is enough.
+
+If you modify the management frontend, rebuild it from the separate frontend repository and then copy the generated file back into CPAplus:
+
+```bash
+# Build management frontend in the separate repo
+cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+npm run build
+
+# Copy the generated frontend back into CPAplus
+cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+```
+
+After replacing `static/management.html`, hard-refresh the browser. A Go server restart is not required for this frontend-only change.
+
 ### Option 3: Docker Build from Source
 
 For developers who want to customize and build their own image.

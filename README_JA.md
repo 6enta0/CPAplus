@@ -139,6 +139,21 @@ go run ./cmd/server --config config.yaml
 # http://localhost:8317/management.html
 ```
 
+サーバーを動かすだけなら、同梱の `static/management.html` で十分です。
+
+管理フロントエンドを変更した場合は、別リポジトリのフロントエンドを再ビルドし、生成物を CPAplus にコピーし直してください。
+
+```bash
+# 別リポジトリで管理フロントエンドをビルド
+cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+npm run build
+
+# 生成物を CPAplus にコピー
+cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+```
+
+`static/management.html` を置き換えた後は、ブラウザをハードリロードしてください。この種のフロントエンドのみの変更では Go サーバーの再起動は不要です。
+
 ### 方法3：ソースからDockerイメージをビルド
 
 カスタマイズして独自イメージをビルドしたい開発者向け。
