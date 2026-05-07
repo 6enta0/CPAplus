@@ -119,6 +119,19 @@ docker compose up -d
 
 If `docker compose up -d` reports `unauthorized` when pulling `ghcr.io/6enta0/cpaplus:latest`, the GHCR package may still be private. Open the package page and set visibility to public.
 
+To update an existing Docker deployment to the latest image later:
+
+```bash
+# In your existing cpa-plus directory
+docker compose pull
+docker compose up -d
+
+# Optional: remove old unused images afterwards
+docker image prune -f
+```
+
+`docker compose pull` downloads the newest `ghcr.io/6enta0/cpaplus:latest` image, and `docker compose up -d` recreates the container with that image while keeping your mounted `config.yaml`, `auths/`, `logs/`, and `data/` files.
+
 ### Option 2: Go Run (Clone & Run)
 
 For users who want to run directly with Go.

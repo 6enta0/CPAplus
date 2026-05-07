@@ -119,6 +119,19 @@ docker compose up -d
 
 `docker compose up -d` で `ghcr.io/6enta0/cpaplus:latest` の取得時に `unauthorized` が表示される場合、GHCR Package がまだ private の可能性があります。GitHub Package ページで可視性を public に変更してください。
 
+既存の Docker デプロイを後で最新イメージへ更新したい場合は、次を実行してください。
+
+```bash
+# 現在の cpa-plus ディレクトリで実行
+docker compose pull
+docker compose up -d
+
+# 任意: 未使用の古いイメージを削除
+docker image prune -f
+```
+
+`docker compose pull` は最新の `ghcr.io/6enta0/cpaplus:latest` イメージを取得し、`docker compose up -d` はそのイメージでコンテナを再作成します。マウント済みの `config.yaml`、`auths/`、`logs/`、`data/` は保持されます。
+
 ### 方法2：Goで直接実行（Cloneして実行）
 
 Goがインストール済みのユーザー向け。
