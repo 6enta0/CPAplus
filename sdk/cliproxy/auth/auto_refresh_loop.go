@@ -336,7 +336,16 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 }
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
-	if auth == nil || auth.Disabled {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if auth.Disabled {
+		if next, ok := codexUsageLimitAutoReenableAt(auth); ok {
+			if !next.After(now) {
+				return now, true
+			}
+			return next, true
+		}
 		return time.Time{}, false
 	}
 

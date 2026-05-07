@@ -40,6 +40,27 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_CodexUsageLimitAutoDisabledSchedulesRecheck(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	nextAt := now.Add(20 * time.Minute)
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "codex",
+		Disabled: true,
+		Metadata: map[string]any{
+			quotaAutoReenableReasonKey: quotaAutoReenableReason,
+			quotaAutoReenableAtKey:     nextAt.Format(time.RFC3339),
+		},
+	}
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok {
+		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+	}
+	if !got.Equal(nextAt) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, nextAt)
+	}
+}
+
 func TestNextRefreshCheckAt_APIKeyUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	auth := &Auth{ID: "a1", Provider: "test", Attributes: map[string]string{"api_key": "k"}}

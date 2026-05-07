@@ -3,12 +3,14 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	internalcodex "github.com/router-for-me/CLIProxyAPI/v6/internal/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -720,6 +722,11 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *tes
 }
 
 func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReached(t *testing.T) {
+	prevCheckQuota := checkCodexQuotaForFile
+	t.Cleanup(func() {
+		checkCodexQuotaForFile = prevCheckQuota
+	})
+
 	store := &captureStore{}
 	m := NewManager(store, nil, nil)
 	executor := &authFallbackExecutor{
@@ -806,6 +813,95 @@ func TestManager_Execute_DisablesCodexAuthFileOnUsageLimitReached(t *testing.T) 
 	}
 	if got, _ := persisted.Metadata["disabled"].(bool); !got {
 		t.Fatalf("expected persisted metadata disabled=true, got %#v", persisted.Metadata["disabled"])
+	}
+	if got := fmt.Sprintf("%v", persisted.Metadata[quotaAutoReenableReasonKey]); got != quotaAutoReenableReason {
+		t.Fatalf("quota auto re-enable reason = %q, want %q", got, quotaAutoReenableReason)
+	}
+}
+
+func TestManager_RefreshCodexUsageLimitedAuth_AutoEnablesWhenQuotaRecovers(t *testing.T) {
+	prevCheckQuota := checkCodexQuotaForFile
+	t.Cleanup(func() {
+		checkCodexQuotaForFile = prevCheckQuota
+	})
+
+	checkCodexQuotaForFile = func(authDir, name string, refreshNow bool, cfg *internalconfig.Config, proxyURL string) internalcodex.QuotaCheckResult {
+		if authDir != "/tmp/auths" {
+			t.Fatalf("authDir = %q, want %q", authDir, "/tmp/auths")
+		}
+		if name != "codex-auth.json" {
+			t.Fatalf("name = %q, want %q", name, "codex-auth.json")
+		}
+		if !refreshNow {
+			t.Fatal("expected refreshNow=true")
+		}
+		return internalcodex.QuotaCheckResult{
+			Name:              name,
+			Status:            "success",
+			PlanType:          "plus",
+			QuotaCheckedAt:    time.Now().Format(time.RFC3339),
+			AutoEnableApplied: true,
+			Windows: []internalcodex.QuotaWindow{{
+				ID:         "weekly",
+				ResetAtISO: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			}},
+		}
+	}
+
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
+	m.SetConfig(&internalconfig.Config{AuthDir: "/tmp/auths"})
+	executor := &authFallbackExecutor{id: "codex"}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-codex-auto-reenable",
+		Provider: "codex",
+		Disabled: true,
+		Status:   StatusDisabled,
+		FileName: "codex-auth.json",
+		Metadata: map[string]any{
+			"type":                     "codex",
+			"disabled":                 true,
+			quotaAutoReenableReasonKey: quotaAutoReenableReason,
+			quotaAutoReenableAtKey:     time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.refreshCodexUsageLimitedAuth(context.Background(), auth.ID, auth.Clone(), &internalconfig.Config{AuthDir: "/tmp/auths"})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to be enabled")
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("status = %v, want %v", updated.Status, StatusActive)
+	}
+	if got, _ := updated.Metadata["disabled"].(bool); got {
+		t.Fatalf("expected metadata disabled=false, got %#v", updated.Metadata["disabled"])
+	}
+	if _, ok := updated.Metadata[quotaAutoReenableReasonKey]; ok {
+		t.Fatalf("expected quota auto re-enable reason to be cleared")
+	}
+	if _, ok := updated.Metadata[quotaAutoReenableAtKey]; ok {
+		t.Fatalf("expected quota auto re-enable at to be cleared")
+	}
+
+	persisted := store.Last()
+	if persisted == nil {
+		t.Fatalf("expected persisted auth snapshot")
+	}
+	if persisted.Disabled {
+		t.Fatalf("expected persisted auth to be enabled")
+	}
+	if got, _ := persisted.Metadata["disabled"].(bool); got {
+		t.Fatalf("expected persisted metadata disabled=false, got %#v", persisted.Metadata["disabled"])
 	}
 }
 

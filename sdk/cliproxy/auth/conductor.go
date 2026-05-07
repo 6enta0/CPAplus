@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	internalcodex "github.com/router-for-me/CLIProxyAPI/v6/internal/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -76,6 +78,14 @@ const (
 )
 
 var quotaCooldownDisabled atomic.Bool
+
+var checkCodexQuotaForFile = internalcodex.CheckQuotaForFile
+
+const (
+	quotaAutoReenableReasonKey = "quota_auto_reenable_reason"
+	quotaAutoReenableAtKey     = "quota_auto_reenable_at"
+	quotaAutoReenableReason    = "usage_limit_reached"
+)
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
@@ -2635,9 +2645,129 @@ func applyPermanentUsageLimitDisable(auth *Auth, resultErr *Error, now time.Time
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["disabled"] = true
+	if nextAutoCheck := quotaAutoReenableAtFromUsageLimitError(resultErr, now); !nextAutoCheck.IsZero() {
+		auth.Metadata[quotaAutoReenableReasonKey] = quotaAutoReenableReason
+		auth.Metadata[quotaAutoReenableAtKey] = nextAutoCheck.Format(time.RFC3339)
+	}
 	if resultErr != nil && strings.TrimSpace(resultErr.Message) != "" {
 		auth.Metadata["quota_error"] = resultErr.Message
 	}
+}
+
+func quotaAutoReenableAtFromUsageLimitError(resultErr *Error, now time.Time) time.Time {
+	if resultErr == nil {
+		return time.Time{}
+	}
+	if resetAt := strings.TrimSpace(gjson.Get(resultErr.Message, "error.resets_at").String()); resetAt != "" {
+		if parsed, ok := parseTimeValue(resetAt); ok && parsed.After(now) {
+			return parsed
+		}
+	}
+	if resetSeconds := gjson.Get(resultErr.Message, "error.resets_in_seconds"); resetSeconds.Exists() {
+		if secs := parseDurationValue(resetSeconds.Value()); secs > 0 {
+			return now.Add(secs)
+		}
+	}
+	if resultErr.HTTPStatus == http.StatusTooManyRequests {
+		return now.Add(quotaBackoffBase)
+	}
+	return time.Time{}
+}
+
+func isCodexUsageLimitAutoDisabled(auth *Auth) bool {
+	if auth == nil || !auth.Disabled || auth.Metadata == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", auth.Metadata[quotaAutoReenableReasonKey])), quotaAutoReenableReason)
+}
+
+func codexUsageLimitAutoReenableAt(auth *Auth) (time.Time, bool) {
+	if !isCodexUsageLimitAutoDisabled(auth) {
+		return time.Time{}, false
+	}
+	if ts, ok := lookupMetadataTime(auth.Metadata, quotaAutoReenableAtKey); ok {
+		return ts, true
+	}
+	return time.Time{}, false
+}
+
+func nextQuotaWindowResetAt(windows []internalcodex.QuotaWindow, now time.Time) time.Time {
+	var next time.Time
+	for _, window := range windows {
+		resetAt := strings.TrimSpace(window.ResetAtISO)
+		if resetAt == "" {
+			continue
+		}
+		parsed, ok := parseTimeValue(resetAt)
+		if !ok || !parsed.After(now) {
+			continue
+		}
+		if next.IsZero() || parsed.Before(next) {
+			next = parsed
+		}
+	}
+	return next
+}
+
+func clearQuotaAutoReenableMetadata(auth *Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	delete(auth.Metadata, quotaAutoReenableReasonKey)
+	delete(auth.Metadata, quotaAutoReenableAtKey)
+}
+
+func applyCodexQuotaCheckResult(auth *Auth, result internalcodex.QuotaCheckResult, now time.Time) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["quota_plan_type"] = result.PlanType
+	auth.Metadata["quota_windows"] = result.Windows
+	auth.Metadata["quota_checked_at"] = result.QuotaCheckedAt
+	auth.Metadata["quota_error"] = result.Error
+	auth.UpdatedAt = now
+
+	if result.Status == "success" && result.AutoEnableApplied {
+		auth.Disabled = false
+		auth.Unavailable = false
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+		auth.LastError = nil
+		auth.NextRetryAfter = time.Time{}
+		auth.Quota.Exceeded = false
+		auth.Quota.Reason = ""
+		auth.Quota.NextRecoverAt = time.Time{}
+		auth.Metadata["disabled"] = false
+		clearQuotaAutoReenableMetadata(auth)
+		return
+	}
+
+	if result.Status == "success" {
+		auth.Disabled = true
+		auth.Status = StatusDisabled
+		auth.StatusMessage = "usage limit reached"
+		auth.Metadata["disabled"] = true
+		if next := nextQuotaWindowResetAt(result.Windows, now); !next.IsZero() {
+			auth.Metadata[quotaAutoReenableReasonKey] = quotaAutoReenableReason
+			auth.Metadata[quotaAutoReenableAtKey] = next.Format(time.RFC3339)
+		} else if _, ok := codexUsageLimitAutoReenableAt(auth); !ok {
+			auth.Metadata[quotaAutoReenableReasonKey] = quotaAutoReenableReason
+			auth.Metadata[quotaAutoReenableAtKey] = now.Add(refreshCheckInterval).Format(time.RFC3339)
+		}
+		return
+	}
+
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "usage limit reached"
+	auth.Metadata["disabled"] = true
+	auth.Metadata[quotaAutoReenableReasonKey] = quotaAutoReenableReason
+	auth.Metadata[quotaAutoReenableAtKey] = now.Add(refreshFailureBackoff).Format(time.RFC3339)
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
@@ -3553,12 +3683,18 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	auth := m.auths[id]
 	var exec ProviderExecutor
 	var cloned *Auth
+	var cfg *internalconfig.Config
 	if auth != nil {
 		exec = m.executors[auth.Provider]
 		cloned = auth.Clone()
 	}
+	cfg, _ = m.runtimeConfig.Load().(*internalconfig.Config)
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
+		return
+	}
+	if isCodexUsageLimitAutoDisabled(cloned) {
+		m.refreshCodexUsageLimitedAuth(ctx, id, cloned, cfg)
 		return
 	}
 	updated, err := exec.Refresh(ctx, cloned)
@@ -3602,6 +3738,43 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	_, _ = m.Update(ctx, updated)
+}
+
+func (m *Manager) refreshCodexUsageLimitedAuth(ctx context.Context, id string, auth *Auth, cfg *internalconfig.Config) {
+	if auth == nil || cfg == nil {
+		return
+	}
+	authDir := strings.TrimSpace(cfg.AuthDir)
+	fileName := strings.TrimSpace(auth.FileName)
+	if authDir == "" || fileName == "" {
+		return
+	}
+	result := checkCodexQuotaForFile(authDir, filepath.Base(fileName), true, cfg, auth.ProxyURL)
+	now := time.Now()
+
+	m.mu.Lock()
+	current := m.auths[id]
+	if current == nil {
+		m.mu.Unlock()
+		return
+	}
+	applyCodexQuotaCheckResult(current, result, now)
+	if result.Status == "error" {
+		current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+	} else {
+		current.NextRefreshAfter = time.Time{}
+	}
+	current.UpdatedAt = now
+	snapshot := current.Clone()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	m.mu.Unlock()
+
+	if errPersist := m.persist(ctx, snapshot); errPersist != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", snapshot.ID).Warnf("failed to persist codex quota auto re-enable state: %v", errPersist)
+	}
+	m.queueRefreshReschedule(id)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
