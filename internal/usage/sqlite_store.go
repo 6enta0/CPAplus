@@ -223,6 +223,69 @@ func (s *SQLiteStore) GetCostByAuthIndex() (map[string]float64, error) {
 	return result, rows.Err()
 }
 
+func (s *SQLiteStore) BackfillCosts() {
+	if s == nil || s.db == nil || s.pricingStore == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(
+		`SELECT id, model, input_tokens, output_tokens, cached_tokens FROM usage_records WHERE cost_usd = 0 AND failed = 0`,
+	)
+	if err != nil {
+		log.WithError(err).Warn("usage db: backfill cost query failed")
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type costUpdate struct {
+		id      int64
+		costUSD float64
+	}
+	var updates []costUpdate
+	for rows.Next() {
+		var id int64
+		var model string
+		var inputTokens, outputTokens, cachedTokens int64
+		if err := rows.Scan(&id, &model, &inputTokens, &outputTokens, &cachedTokens); err != nil {
+			continue
+		}
+		if model == "" || model == "unknown" {
+			continue
+		}
+		prices, ok := s.pricingStore.Lookup(model)
+		if !ok {
+			continue
+		}
+		cost := pricing.CalcCost(inputTokens, outputTokens, cachedTokens, prices)
+		if cost > 0 {
+			updates = append(updates, costUpdate{id: id, costUSD: cost})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.WithError(err).Warn("usage db: backfill cost rows iteration failed")
+		return
+	}
+	if len(updates) == 0 {
+		return
+	}
+
+	stmt, err := s.db.Prepare(`UPDATE usage_records SET cost_usd = ? WHERE id = ?`)
+	if err != nil {
+		log.WithError(err).Warn("usage db: backfill cost prepare failed")
+		return
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, u := range updates {
+		if _, err := stmt.Exec(u.costUSD, u.id); err != nil {
+			log.WithError(err).WithField("id", u.id).Warn("usage db: backfill cost update failed")
+		}
+	}
+	log.Infof("usage db: backfilled cost for %d records", len(updates))
+}
+
 func (s *SQLiteStore) LoadAll() ([]loadedRecord, error) {
 	if s == nil || s.db == nil {
 		return nil, nil

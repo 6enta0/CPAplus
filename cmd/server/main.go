@@ -594,6 +594,7 @@ func main() {
 						sqliteStore.SetPricingStore(pricingStore)
 						usage.GetRequestStatistics().SetPricingStore(pricingStore)
 						usage.GetRequestStatistics().SetSQLiteStore(sqliteStore)
+						sqliteStore.BackfillCosts()
 						_ = pricing.StartSyncLoop(pricingStore, 72*time.Hour)
 					}
 					defer func() {
