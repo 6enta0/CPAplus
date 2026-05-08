@@ -41,6 +41,9 @@ func (s *Store) initCustomPrices() {
 		"mimo-v2.5":     {0.4 / 1e6, 2.0 / 1e6, 0.08 / 1e6, 0},
 		"mimo-v2-omni":  {0.4 / 1e6, 2.0 / 1e6, 0.08 / 1e6, 0},
 		"mimo-v2-flash": {0.1 / 1e6, 0.3 / 1e6, 0.01 / 1e6, 0},
+		"glm-5.1":       {1.4 / 1e6, 4.4 / 1e6, 0.26 / 1e6, 0},
+		"glm-5":         {1.0 / 1e6, 3.2 / 1e6, 0.2 / 1e6, 0},
+		"glm-5-turbo":   {1.2 / 1e6, 4.0 / 1e6, 0.24 / 1e6, 0},
 	}
 }
 
@@ -90,6 +93,9 @@ func (s *Store) Lookup(model string) ([4]float64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if p, ok := s.customPrices[model]; ok {
+		return p, true
+	}
+	if p, ok := s.customPrices[strings.ToLower(model)]; ok {
 		return p, true
 	}
 	return matchPricing(model, s.prices)
@@ -204,8 +210,15 @@ func matchPricing(model string, allPrices map[string][4]float64) ([4]float64, bo
 	if p, ok := allPrices[model]; ok {
 		return p, true
 	}
+	lower := strings.ToLower(model)
+	if p, ok := allPrices[lower]; ok {
+		return p, true
+	}
 	for _, prefix := range []string{"anthropic/", "openai/", "deepseek/", "gemini/", "google/", "mistral/", "cohere/", "azure_ai/"} {
 		if p, ok := allPrices[prefix+model]; ok {
+			return p, true
+		}
+		if p, ok := allPrices[prefix+lower]; ok {
 			return p, true
 		}
 	}
