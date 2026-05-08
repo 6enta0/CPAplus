@@ -587,6 +587,7 @@ func main() {
 					log.WithError(errInitUsage).Warn("usage: sqlite persistence init failed")
 				}
 				if sqliteStore != nil {
+					sqliteStore.MigrateLegacyOpenAICompatAuthIndexes(cfg)
 					pricingStore := pricing.NewStore()
 					if err := pricingStore.Sync(); err != nil {
 						log.WithError(err).Warn("pricing: initial sync failed")

@@ -1,7 +1,9 @@
 package usage
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/pricing"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -52,6 +55,52 @@ type SQLiteStore struct {
 
 func (s *SQLiteStore) SetPricingStore(ps *pricing.Store) {
 	s.pricingStore = ps
+}
+
+func stableUsageHash(seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:8])
+}
+
+func stableUsageToken(kind string, parts ...string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(kind))
+	for _, part := range parts {
+		hasher.Write([]byte{0})
+		hasher.Write([]byte(strings.TrimSpace(part)))
+	}
+	digest := hex.EncodeToString(hasher.Sum(nil))
+	if len(digest) < 12 {
+		return fmt.Sprintf("%012s", digest)
+	}
+	return digest[:12]
+}
+
+func buildOpenAICompatAuthIndex(providerName, compatName, baseURL, apiKey, proxyURL, prefix string, includePrefix bool) string {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	compatName = strings.ToLower(strings.TrimSpace(compatName))
+	baseURL = strings.TrimSpace(baseURL)
+	apiKey = strings.TrimSpace(apiKey)
+	proxyURL = strings.TrimSpace(proxyURL)
+	prefix = strings.TrimSpace(prefix)
+	if providerName == "" || baseURL == "" || apiKey == "" {
+		return ""
+	}
+	idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+	token := stableUsageToken(idKind, apiKey, baseURL, proxyURL)
+	parts := []string{"provider=" + providerName}
+	if compatName != "" {
+		parts = append(parts, "compat="+compatName)
+	}
+	parts = append(parts, "base="+baseURL, "api_key="+apiKey, "source=config:"+providerName+"["+token+"]")
+	if includePrefix && prefix != "" {
+		parts = append(parts, "prefix="+prefix)
+	}
+	return stableUsageHash("config:" + strings.Join(parts, "\x00"))
 }
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
@@ -284,6 +333,58 @@ func (s *SQLiteStore) BackfillCosts() {
 		}
 	}
 	log.Infof("usage db: backfilled cost for %d records", len(updates))
+}
+
+func (s *SQLiteStore) MigrateLegacyOpenAICompatAuthIndexes(cfg *config.Config) {
+	if s == nil || s.db == nil || cfg == nil {
+		return
+	}
+
+	type remap struct {
+		from string
+		to   string
+	}
+	var remaps []remap
+	for i := range cfg.OpenAICompatibility {
+		compat := cfg.OpenAICompatibility[i]
+		if compat.Disabled || strings.TrimSpace(compat.Prefix) == "" {
+			continue
+		}
+		providerName := compat.Name
+		if strings.TrimSpace(providerName) == "" {
+			providerName = "openai-compatibility"
+		}
+		for j := range compat.APIKeyEntries {
+			entry := compat.APIKeyEntries[j]
+			legacy := buildOpenAICompatAuthIndex(providerName, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, compat.Prefix, false)
+			current := buildOpenAICompatAuthIndex(providerName, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, compat.Prefix, true)
+			if legacy != "" && current != "" && legacy != current {
+				remaps = append(remaps, remap{from: legacy, to: current})
+			}
+		}
+	}
+	if len(remaps) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	migrated := 0
+	for _, remap := range remaps {
+		res, err := s.db.Exec(`UPDATE usage_records SET auth_index = ? WHERE auth_index = ?`, remap.to, remap.from)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{"from": remap.from, "to": remap.to}).Warn("usage db: auth_index migration failed")
+			continue
+		}
+		affected, err := res.RowsAffected()
+		if err == nil && affected > 0 {
+			migrated += int(affected)
+		}
+	}
+	if migrated > 0 {
+		log.Infof("usage db: migrated %d usage records to current openai-compatible auth indexes", migrated)
+	}
 }
 
 func (s *SQLiteStore) LoadAll() ([]loadedRecord, error) {
