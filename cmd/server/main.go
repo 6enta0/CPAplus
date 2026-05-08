@@ -589,6 +589,11 @@ func main() {
 				if sqliteStore != nil {
 					sqliteStore.MigrateLegacyOpenAICompatAuthIndexes(cfg)
 					pricingStore := pricing.NewStore()
+					if persistedCustomPrices, err := sqliteStore.LoadCustomPrices(); err != nil {
+						log.WithError(err).Warn("pricing: failed to load persisted custom prices")
+					} else if len(persistedCustomPrices) > 0 {
+						pricingStore.SetCustomPrices(persistedCustomPrices)
+					}
 					if err := pricingStore.Sync(); err != nil {
 						log.WithError(err).Warn("pricing: initial sync failed")
 					} else {

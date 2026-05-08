@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS auth_last_used (
 	auth_index    TEXT PRIMARY KEY,
 	last_called_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS custom_model_prices (
+	model            TEXT PRIMARY KEY,
+	prompt_price     REAL NOT NULL DEFAULT 0,
+	completion_price REAL NOT NULL DEFAULT 0,
+	cache_price      REAL NOT NULL DEFAULT 0,
+	cache_write_price REAL NOT NULL DEFAULT 0
+);
 `
 
 type SQLiteStore struct {
@@ -333,6 +340,69 @@ func (s *SQLiteStore) BackfillCosts() {
 		}
 	}
 	log.Infof("usage db: backfilled cost for %d records", len(updates))
+}
+
+func (s *SQLiteStore) SaveCustomPrices(prices map[string][4]float64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("usage db: begin save custom prices failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM custom_model_prices`); err != nil {
+		return fmt.Errorf("usage db: clear custom prices failed: %w", err)
+	}
+
+	stmt, err := tx.Prepare(`INSERT INTO custom_model_prices (model, prompt_price, completion_price, cache_price, cache_write_price) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("usage db: prepare custom prices insert failed: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for model, price := range prices {
+		if _, err := stmt.Exec(model, price[0], price[1], price[2], price[3]); err != nil {
+			return fmt.Errorf("usage db: insert custom price for %s failed: %w", model, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("usage db: commit custom prices failed: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) LoadCustomPrices() (map[string][4]float64, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(`SELECT model, prompt_price, completion_price, cache_price, cache_write_price FROM custom_model_prices`)
+	if err != nil {
+		return nil, fmt.Errorf("usage db: query custom prices failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	prices := make(map[string][4]float64)
+	for rows.Next() {
+		var model string
+		var prompt, completion, cache, cacheWrite float64
+		if err := rows.Scan(&model, &prompt, &completion, &cache, &cacheWrite); err != nil {
+			return nil, fmt.Errorf("usage db: scan custom prices failed: %w", err)
+		}
+		prices[model] = [4]float64{prompt, completion, cache, cacheWrite}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage db: iterate custom prices failed: %w", err)
+	}
+	return prices, nil
 }
 
 func (s *SQLiteStore) MigrateLegacyOpenAICompatAuthIndexes(cfg *config.Config) {

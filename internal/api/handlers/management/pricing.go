@@ -60,6 +60,12 @@ func (h *Handler) PutCustomPricing(c *gin.Context) {
 		}
 	}
 
+	if h.usageStore != nil {
+		if err := h.usageStore.SaveCustomPrices(customPrices); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	ps.SetCustomPrices(customPrices)
 	custom := ps.CustomPricesFrontend()
 	c.JSON(http.StatusOK, gin.H{"custom_prices": custom, "count": len(custom)})
