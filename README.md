@@ -201,6 +201,9 @@ See [config.example.yaml](config.example.yaml) for full configuration reference.
 | `usage-db-path` | SQLite database path for usage persistence (default: `usage.db`) |
 | `remote-management` | Management dashboard access (secret-key for auth) |
 
+## Community
+Enjoy AI in [LINUX.DO](https://linux.do/) community!
+
 ## License
 
 Same as the upstream CLIProxyAPI project.

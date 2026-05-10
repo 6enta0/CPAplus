@@ -201,6 +201,10 @@ cp config.example.yaml config.yaml
 | `usage-db-path` | SQLiteデータベースパス、使用データを永続化（デフォルト：`usage.db`） |
 | `remote-management` | 管理ダッシュボードアクセス設定（secret-keyで認証） |
 
+## コミュニティ
+
+[LINUX.DO](https://linux.do/) コミュニティで一緒に AI を楽しみましょう！
+
 ## ライセンス
 
 上流CLIProxyAPIプロジェクトと同一。

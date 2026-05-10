@@ -201,6 +201,10 @@ cp config.example.yaml config.yaml
 | `usage-db-path` | SQLite 数据库路径，持久化使用数据（默认：`usage.db`） |
 | `remote-management` | 管理面板访问配置（secret-key 用于认证） |
 
+## 社区
+
+欢迎到 [LINUX.DO](https://linux.do/) 社区一起玩 AI！
+
 ## 许可证
 
 与上游 CLIProxyAPI 项目相同。
