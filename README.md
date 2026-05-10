@@ -2,6 +2,8 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+![CPAplus Management View](static/x5table-view.jpg)
+
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
 
 Modified from:

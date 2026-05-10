@@ -2,6 +2,8 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
+![CPAplus 管理画面ビュー](static/x5table-view.jpg)
+
 CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供するプロキシサーバー。
 
 改変元：

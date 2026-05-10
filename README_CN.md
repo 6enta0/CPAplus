@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
+![CPAplus 管理界面视图](static/x5table-view.jpg)
+
 为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
 
 修改自：
