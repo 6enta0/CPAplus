@@ -558,6 +558,16 @@ func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 	if strings.TrimSpace(resolvedModel) == "" {
 		resolvedModel = requestedModel
 	}
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, resolvedModel); len(pool) > 0 {
+		if len(pool) == 1 {
+			return strings.TrimSpace(pool[0])
+		}
+		return resolvedModel
+	}
+	apiKeyResolvedModel := m.applyAPIKeyModelAlias(auth, resolvedModel)
+	if strings.TrimSpace(apiKeyResolvedModel) != "" {
+		return apiKeyResolvedModel
+	}
 	return resolvedModel
 }
 
@@ -2022,7 +2032,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
-			return 0, false
+			return maxWait, true
 		}
 		return wait, true
 	}
@@ -2938,6 +2948,14 @@ func shouldRetrySchedulerPick(err error) bool {
 func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
 	if auth == nil || strings.TrimSpace(routeModel) == "" {
 		return false
+	}
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = strings.TrimSpace(routeModel)
+	}
+	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 1 {
+		return true
 	}
 	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
 }

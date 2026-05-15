@@ -178,3 +178,72 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectionModelForAuth_UsesSingleOpenAICompatAlias(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "compat-a",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "deepseek-v3.1", Alias: "claude-opus-4.1"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "compat-auth",
+		Provider: "compat-a",
+		Attributes: map[string]string{
+			"api_key":      "k",
+			"compat_name":  "compat-a",
+			"provider_key": "compat-a",
+		},
+	}
+
+	got := mgr.selectionModelForAuth(auth, "claude-opus-4.1")
+	if got != "deepseek-v3.1" {
+		t.Fatalf("selectionModelForAuth() = %q, want %q", got, "deepseek-v3.1")
+	}
+	if !mgr.routeAwareSelectionRequired(auth, "claude-opus-4.1") {
+		t.Fatal("expected routeAwareSelectionRequired() to be true for single OpenAI-compatible alias")
+	}
+}
+
+func TestRouteAwareSelectionRequired_OpenAICompatPoolReturnsTrue(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "compat-pool",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "deepseek-v3.1", Alias: "claude-opus-4.1"},
+					{Name: "glm-5", Alias: "claude-opus-4.1"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	auth := &Auth{
+		ID:       "compat-pool-auth",
+		Provider: "compat-pool",
+		Attributes: map[string]string{
+			"api_key":      "k",
+			"compat_name":  "compat-pool",
+			"provider_key": "compat-pool",
+		},
+	}
+
+	got := mgr.selectionModelForAuth(auth, "claude-opus-4.1")
+	if got != "claude-opus-4.1" {
+		t.Fatalf("selectionModelForAuth() = %q, want %q for pooled alias", got, "claude-opus-4.1")
+	}
+	if !mgr.routeAwareSelectionRequired(auth, "claude-opus-4.1") {
+		t.Fatal("expected routeAwareSelectionRequired() to be true for pooled OpenAI-compatible alias")
+	}
+}

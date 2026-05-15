@@ -111,6 +111,38 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_ShouldRetryAfterError_CapsCooldownWaitToMaxRetryInterval(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "test-model"
+	next := time.Now().Add(1 * time.Minute)
+
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{Message: "dial tcp: connection refused"}, 0, []string{"claude"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for capped cooldown wait")
+	}
+	if wait != maxWait {
+		t.Fatalf("wait = %v, want capped maxWait %v", wait, maxWait)
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
