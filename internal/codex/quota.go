@@ -243,7 +243,8 @@ func DetermineAutoDisable(planType string, windows []QuotaWindow) *bool {
 		val := false
 		return &val
 	}
-	return nil
+	val := *fiveHourPct >= 100 || *weeklyPct >= 100
+	return &val
 }
 
 func CheckQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config, proxyURL string) QuotaCheckResult {
