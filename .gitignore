@@ -5,6 +5,8 @@ cli-proxy-api
 # Configuration
 config.yaml
 test-config.yaml
+test-config-bak0512.yaml
+test-config-exp.yaml
 .env
 
 # Generated content
