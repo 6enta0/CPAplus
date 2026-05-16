@@ -77,6 +77,10 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// AuthAutoRefreshEnabled controls whether the core auth background auto-refresh loop starts.
+	// Default is false (disabled).
+	AuthAutoRefreshEnabled bool `yaml:"auth-auto-refresh-enabled" json:"auth-auto-refresh-enabled"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`

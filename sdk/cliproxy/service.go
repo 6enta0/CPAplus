@@ -706,8 +706,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	log.Info("file watcher started for config and auth directory changes")
 
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil {
+	// Prefer core auth manager auto refresh when explicitly enabled.
+	if s.coreManager != nil && s.cfg != nil && s.cfg.AuthAutoRefreshEnabled {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)

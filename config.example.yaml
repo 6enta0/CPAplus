@@ -101,6 +101,11 @@ disable-cooling: false
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
 disable-image-generation: false
 
+# When true, enable the core auth background auto-refresh loop.
+# Default is false (disabled). This only controls the background refresh loop and
+# does not disable refresh performed by manual quota checks or request-time flows.
+auth-auto-refresh-enabled: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
