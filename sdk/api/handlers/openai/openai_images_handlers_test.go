@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
@@ -57,6 +58,19 @@ func TestImagesModelValidationAllowsGPTImage2WithOptionalPrefix(t *testing.T) {
 	}
 	if isSupportedImagesModel("gpt-5.4-mini") {
 		t.Fatal("expected gpt-5.4-mini to be rejected")
+	}
+}
+
+func TestShouldPassthroughOpenAICompatImages(t *testing.T) {
+	r := registry.GetGlobalRegistry()
+	r.RegisterClient("test-openai-compat-image", "openai-compatibility", []*registry.ModelInfo{{ID: defaultImagesToolModel}})
+	t.Cleanup(func() { r.UnregisterClient("test-openai-compat-image") })
+
+	if !shouldPassthroughOpenAICompatImages(defaultImagesToolModel) {
+		t.Fatalf("expected %s to prefer openai-compatible passthrough when registered", defaultImagesToolModel)
+	}
+	if shouldPassthroughOpenAICompatImages("gpt-5.4-mini") {
+		t.Fatalf("non-image models must not enter the passthrough branch")
 	}
 }
 

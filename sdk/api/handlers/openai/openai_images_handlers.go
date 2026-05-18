@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -23,10 +24,11 @@ import (
 )
 
 const (
-	defaultImagesMainModel = "gpt-5.4-mini"
-	defaultImagesToolModel = "gpt-image-2"
-	imagesGenerationsPath  = "/v1/images/generations"
-	imagesEditsPath        = "/v1/images/edits"
+	defaultImagesMainModel  = "gpt-5.4-mini"
+	defaultImagesToolModel  = "gpt-image-2"
+	imagesGenerationsPath   = "/v1/images/generations"
+	imagesEditsPath         = "/v1/images/edits"
+	openaiImagesHandlerType = "openai-image"
 )
 
 type imageCallResult struct {
@@ -248,6 +250,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+
+	if shouldPassthroughOpenAICompatImages(imageModel) {
+		h.handleOpenAICompatImages(c, rawJSON, responseFormat, "image_generation", stream)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -960,4 +967,126 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 		}
 	}
+}
+
+func shouldPassthroughOpenAICompatImages(model string) bool {
+	baseModel := strings.TrimSpace(model)
+	if idx := strings.LastIndex(baseModel, "/"); idx >= 0 && idx < len(baseModel)-1 {
+		baseModel = strings.TrimSpace(baseModel[idx+1:])
+	}
+	if baseModel != defaultImagesToolModel {
+		return false
+	}
+	for _, candidate := range []string{strings.TrimSpace(model), baseModel} {
+		if candidate == "" {
+			continue
+		}
+		for _, provider := range util.GetProviderName(candidate) {
+			provider = strings.TrimSpace(provider)
+			if provider != "" && !strings.EqualFold(provider, "codex") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) handleOpenAICompatImages(c *gin.Context, rawJSON []byte, responseFormat string, streamPrefix string, stream bool) {
+	if stream {
+		h.streamOpenAICompatImages(c, rawJSON, responseFormat, streamPrefix)
+		return
+	}
+	h.collectOpenAICompatImages(c, rawJSON)
+}
+
+func (h *OpenAIAPIHandler) collectOpenAICompatImages(c *gin.Context, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, openaiImagesHandlerType, imageModel, rawJSON, "")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel(nil)
+}
+
+func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, rawJSON []byte, responseFormat string, streamPrefix string) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported",
+				Type:    "server_error",
+			},
+		})
+		return
+	}
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, openaiImagesHandlerType, imageModel, rawJSON, "")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+
+	eventName := streamPrefix + ".completed"
+	normalized := strings.ToLower(strings.TrimSpace(responseFormat))
+	if normalized != "url" {
+		normalized = "b64_json"
+	}
+	for _, item := range gjson.GetBytes(resp, "data").Array() {
+		data := []byte(`{"type":""}`)
+		data, _ = sjson.SetBytes(data, "type", eventName)
+		if normalized == "url" {
+			if url := strings.TrimSpace(item.Get("url").String()); url != "" {
+				data, _ = sjson.SetBytes(data, "url", url)
+			} else {
+				data, _ = sjson.SetBytes(data, "url", "data:image/png;base64,"+strings.TrimSpace(item.Get("b64_json").String()))
+			}
+		} else if b64 := strings.TrimSpace(item.Get("b64_json").String()); b64 != "" {
+			data, _ = sjson.SetBytes(data, "b64_json", b64)
+		} else if url := strings.TrimSpace(item.Get("url").String()); url != "" {
+			data, _ = sjson.SetBytes(data, "url", url)
+		}
+		if revised := strings.TrimSpace(item.Get("revised_prompt").String()); revised != "" {
+			data, _ = sjson.SetBytes(data, "revised_prompt", revised)
+		}
+		if eventName != "" {
+			_, _ = fmt.Fprintf(c.Writer, "event: %s\n", eventName)
+		}
+		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(data))
+		flusher.Flush()
+	}
+	cliCancel(nil)
 }
