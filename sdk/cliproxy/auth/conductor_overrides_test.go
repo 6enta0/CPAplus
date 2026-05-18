@@ -143,6 +143,78 @@ func TestManager_ShouldRetryAfterError_CapsCooldownWaitToMaxRetryInterval(t *tes
 	}
 }
 
+func TestManager_ShouldRetryAfterError_OpenAICompatCooldownAboveMaxWaitReturnsImmediately(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	model := "test-model"
+	next := time.Now().Add(1 * time.Minute)
+
+	auth := &Auth{
+		ID:       "compat-auth",
+		Provider: "compat-a",
+		Attributes: map[string]string{
+			"api_key":      "sk-a",
+			"compat_name":  "compat-a",
+			"provider_key": "compat-a",
+		},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{Message: "dial tcp: connection refused"}, 0, []string{"compat-a"}, model, maxWait)
+	if shouldRetry {
+		t.Fatalf("expected shouldRetry=false for compat cooldown above maxWait, got true (wait=%v)", wait)
+	}
+	if wait != 0 {
+		t.Fatalf("wait = %v, want 0", wait)
+	}
+}
+
+func TestResolveOpenAICompatConfig_PrefersCompositeProviderKey(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:    "shared",
+				Prefix:  "deepseek",
+				BaseURL: "https://deepseek.example/v1",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "deepseek-v4-flash"},
+				},
+			},
+			{
+				Name:    "shared",
+				Prefix:  "glm",
+				BaseURL: "https://glm.example/v1",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "glm-5.1"},
+				},
+			},
+		},
+	}
+
+	providerKey := internalconfig.OpenAICompatibilityProviderKey("shared", "glm", "https://glm.example/v1")
+	entry := resolveOpenAICompatConfig(cfg, providerKey, "shared", providerKey)
+	if entry == nil {
+		t.Fatal("resolveOpenAICompatConfig() returned nil")
+	}
+	if entry.Prefix != "glm" {
+		t.Fatalf("resolveOpenAICompatConfig() prefix = %q, want %q", entry.Prefix, "glm")
+	}
+	if entry.BaseURL != "https://glm.example/v1" {
+		t.Fatalf("resolveOpenAICompatConfig() baseURL = %q, want %q", entry.BaseURL, "https://glm.example/v1")
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -473,6 +474,85 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		}
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestManager_PickNextMixed_OpenAICompatStrategyOverridesGlobalFillFirst(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy:                    "fill-first",
+			OpenAICompatibilityStrategy: "round-robin",
+		},
+	})
+	for _, provider := range []string{"compat-a", "compat-b", "compat-c"} {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	auths := []*Auth{
+		{ID: "compat-a-auth", Provider: "compat-a", Attributes: map[string]string{"api_key": "sk-a", "compat_name": "compat-a", "provider_key": "compat-a"}},
+		{ID: "compat-b-auth", Provider: "compat-b", Attributes: map[string]string{"api_key": "sk-b", "compat_name": "compat-b", "provider_key": "compat-b"}},
+		{ID: "compat-c-auth", Provider: "compat-c", Attributes: map[string]string{"api_key": "sk-c", "compat_name": "compat-c", "provider_key": "compat-c"}},
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	wantProviders := []string{"compat-a", "compat-b", "compat-c"}
+	wantIDs := []string{"compat-a-auth", "compat-b-auth", "compat-c-auth"}
+	for index := range wantProviders {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"compat-a", "compat-b", "compat-c"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if provider != wantProviders[index] {
+			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
+		}
+		if got.ID != wantIDs[index] {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestManager_PickNextMixed_OpenAICompatStrategyDoesNotAffectNonCompatPools(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy:                    "fill-first",
+			OpenAICompatibilityStrategy: "round-robin",
+		},
+	})
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(gemini-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-a", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(claude-a) error = %v", errRegister)
+	}
+
+	for index := 0; index < 3; index++ {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if provider != "gemini" {
+			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, "gemini")
+		}
+		if got.ID != "gemini-a" {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, "gemini-a")
 		}
 	}
 }

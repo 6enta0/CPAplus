@@ -401,30 +401,14 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	if auth == nil || e.cfg == nil {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
+	providerKey := ""
+	compatName := ""
 	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
-			candidates = append(candidates, v)
-		}
-		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
-			candidates = append(candidates, v)
-		}
+		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
-	if v := strings.TrimSpace(auth.Provider); v != "" {
-		candidates = append(candidates, v)
-	}
-	for i := range e.cfg.OpenAICompatibility {
-		compat := &e.cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				return compat
-			}
-		}
-	}
-	return nil
+	authProvider := strings.TrimSpace(auth.Provider)
+	return config.ResolveOpenAICompatibilityEntry(e.cfg.OpenAICompatibility, providerKey, compatName, authProvider)
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

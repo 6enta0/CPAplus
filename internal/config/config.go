@@ -231,6 +231,11 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// OpenAICompatibilityStrategy overrides selection for OpenAI-compatible
+	// provider pools only. When empty, those requests use Strategy.
+	// Supported values: "round-robin", "fill-first".
+	OpenAICompatibilityStrategy string `yaml:"openai-compatibility-strategy,omitempty" json:"openai-compatibility-strategy,omitempty"`
+
 	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
 	// When enabled, requests with the same session ID (extracted from metadata.user_id)
 	// are routed to the same auth credential when available.
@@ -578,6 +583,98 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// OpenAICompatibilityProviderName normalizes the logical provider name for an
+// OpenAI-compatible entry. Empty names collapse to the historical fallback key.
+func OpenAICompatibilityProviderName(name string) string {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return "openai-compatibility"
+	}
+	return normalized
+}
+
+// OpenAICompatibilityProviderKey returns the routing/executor key used for one
+// OpenAI-compatible provider variant. The key must distinguish entries that
+// share name but differ by prefix and/or base URL.
+func OpenAICompatibilityProviderKey(name, prefix, baseURL string) string {
+	providerName := OpenAICompatibilityProviderName(name)
+	normalizedPrefix := normalizeModelPrefix(prefix)
+	normalizedBaseURL := strings.TrimSpace(baseURL)
+	parts := []string{providerName}
+	if normalizedPrefix != "" {
+		parts = append(parts, "prefix="+normalizedPrefix)
+	}
+	if normalizedBaseURL != "" {
+		parts = append(parts, "base="+normalizedBaseURL)
+	}
+	return strings.Join(parts, "|")
+}
+
+// OpenAICompatibilityProviderKeyForEntry derives the routing/executor key for
+// a full OpenAI-compatible config entry.
+func OpenAICompatibilityProviderKeyForEntry(entry OpenAICompatibility) string {
+	return OpenAICompatibilityProviderKey(entry.Name, entry.Prefix, entry.BaseURL)
+}
+
+// OpenAICompatibilityEntryMatches reports whether the given routing/config
+// candidates identify this OpenAI-compatible entry. Composite provider keys are
+// preferred; legacy name-only matches remain supported as a fallback.
+func OpenAICompatibilityEntryMatches(entry OpenAICompatibility, providerKey, compatName, authProvider string) bool {
+	entryName := strings.TrimSpace(entry.Name)
+	entryKey := OpenAICompatibilityProviderKeyForEntry(entry)
+
+	for _, candidate := range []string{strings.TrimSpace(providerKey), strings.TrimSpace(authProvider)} {
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(candidate, entryKey) {
+			return true
+		}
+	}
+
+	for _, candidate := range []string{strings.TrimSpace(providerKey), strings.TrimSpace(authProvider), strings.TrimSpace(compatName)} {
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(candidate, entryName) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveOpenAICompatibilityEntry selects one OpenAI-compatible config entry
+// using a two-pass match: exact composite provider key first, then legacy
+// logical-name fallback for older auth metadata.
+func ResolveOpenAICompatibilityEntry(entries []OpenAICompatibility, providerKey, compatName, authProvider string) *OpenAICompatibility {
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Disabled {
+			continue
+		}
+		entryKey := OpenAICompatibilityProviderKeyForEntry(*entry)
+		for _, candidate := range []string{strings.TrimSpace(providerKey), strings.TrimSpace(authProvider)} {
+			if candidate == "" {
+				continue
+			}
+			if strings.EqualFold(candidate, entryKey) {
+				return entry
+			}
+		}
+	}
+
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Disabled {
+			continue
+		}
+		if OpenAICompatibilityEntryMatches(*entry, providerKey, compatName, authProvider) {
+			return entry
+		}
+	}
+	return nil
+}
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,

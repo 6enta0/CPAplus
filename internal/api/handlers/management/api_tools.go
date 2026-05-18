@@ -753,32 +753,15 @@ func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, 
 	if apiKey == "" {
 		return ""
 	}
-	candidates := make([]string, 0, 3)
-	if v := strings.TrimSpace(compatName); v != "" {
-		candidates = append(candidates, v)
+	authProvider := strings.TrimSpace(auth.Provider)
+	compat := config.ResolveOpenAICompatibilityEntry(cfg.OpenAICompatibility, providerKey, compatName, authProvider)
+	if compat == nil {
+		return ""
 	}
-	if v := strings.TrimSpace(providerKey); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(auth.Provider); v != "" {
-		candidates = append(candidates, v)
-	}
-
-	for i := range cfg.OpenAICompatibility {
-		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				for j := range compat.APIKeyEntries {
-					entry := &compat.APIKeyEntries[j]
-					if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
-						return strings.TrimSpace(entry.ProxyURL)
-					}
-				}
-				return ""
-			}
+	for j := range compat.APIKeyEntries {
+		entry := &compat.APIKeyEntries[j]
+		if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+			return strings.TrimSpace(entry.ProxyURL)
 		}
 	}
 	return ""

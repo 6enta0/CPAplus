@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -207,10 +208,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			continue
 		}
 		prefix := strings.TrimSpace(compat.Prefix)
-		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
-		if providerName == "" {
-			providerName = "openai-compatibility"
-		}
+		providerKey := config.OpenAICompatibilityProviderKey(compat.Name, prefix, compat.BaseURL)
 		base := strings.TrimSpace(compat.BaseURL)
 
 		// Handle new APIKeyEntries format (preferred)
@@ -219,13 +217,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			entry := &compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
-			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			id, token := idGen.Next(idKind, key, base, proxyURL)
+			idKind := fmt.Sprintf("openai-compatibility:%s", providerKey)
+			id, token := idGen.Next(idKind, key, proxyURL)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"source":       fmt.Sprintf("config:%s[%s]", providerKey, token),
 				"base_url":     base,
 				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"provider_key": providerKey,
 			}
 			if prefix != "" {
 				attrs["prefix"] = prefix
@@ -242,7 +240,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
-				Provider:   providerName,
+				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
@@ -256,13 +254,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		}
 		// Fallback: create entry without API key if no APIKeyEntries
 		if createdEntries == 0 {
-			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			id, token := idGen.Next(idKind, base)
+			idKind := fmt.Sprintf("openai-compatibility:%s", providerKey)
+			id, token := idGen.Next(idKind)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"source":       fmt.Sprintf("config:%s[%s]", providerKey, token),
 				"base_url":     base,
 				"compat_name":  compat.Name,
-				"provider_key": providerName,
+				"provider_key": providerKey,
 			}
 			if prefix != "" {
 				attrs["prefix"] = prefix
@@ -276,7 +274,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
-				Provider:   providerName,
+				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,

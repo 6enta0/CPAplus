@@ -369,6 +369,61 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_ProviderKeyUsesNamePrefixBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "Shared",
+					Prefix:  "deepseek",
+					BaseURL: "https://one.example/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "key-a"},
+					},
+				},
+				{
+					Name:    "Shared",
+					Prefix:  "glm",
+					BaseURL: "https://two.example/v1",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "key-b"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	wantFirst := config.OpenAICompatibilityProviderKey("Shared", "deepseek", "https://one.example/v1")
+	wantSecond := config.OpenAICompatibilityProviderKey("Shared", "glm", "https://two.example/v1")
+
+	if auths[0].Provider != wantFirst {
+		t.Fatalf("auths[0].Provider = %q, want %q", auths[0].Provider, wantFirst)
+	}
+	if got := auths[0].Attributes["provider_key"]; got != wantFirst {
+		t.Fatalf("auths[0].Attributes[provider_key] = %q, want %q", got, wantFirst)
+	}
+	if auths[1].Provider != wantSecond {
+		t.Fatalf("auths[1].Provider = %q, want %q", auths[1].Provider, wantSecond)
+	}
+	if got := auths[1].Attributes["provider_key"]; got != wantSecond {
+		t.Fatalf("auths[1].Attributes[provider_key] = %q, want %q", got, wantSecond)
+	}
+	if auths[0].ID == auths[1].ID {
+		t.Fatalf("expected distinct auth IDs, got duplicate %q", auths[0].ID)
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -608,7 +663,13 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "compat", "vertex"}
+	expected := []string{
+		"gemini",
+		"claude",
+		"codex",
+		config.OpenAICompatibilityProviderKey("compat", "", "https://compat.api"),
+		"vertex",
+	}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

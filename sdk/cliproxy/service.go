@@ -358,9 +358,9 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 		compatName = strings.TrimSpace(a.Attributes["compat_name"])
 		if compatName != "" {
 			if providerKey == "" {
-				providerKey = compatName
+				providerKey = config.OpenAICompatibilityProviderKey(compatName, a.Prefix, a.Attributes["base_url"])
 			}
-			return strings.ToLower(providerKey), compatName, true
+			return providerKey, compatName, true
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "openai-compatibility") {
@@ -949,12 +949,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						compatName = v
 					}
 					if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-						providerKey = strings.ToLower(v)
+						providerKey = v
 						isCompatAuth = true
 					}
 				}
 				if providerKey == "openai-compatibility" && compatName != "" {
-					providerKey = strings.ToLower(compatName)
+					providerKey = config.OpenAICompatibilityProviderKey(compatName, a.Prefix, a.Attributes["base_url"])
 				}
 			} else if a.Attributes != nil {
 				if v := strings.TrimSpace(a.Attributes["compat_name"]); v != "" {
@@ -962,53 +962,47 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 					isCompatAuth = true
 				}
 				if v := strings.TrimSpace(a.Attributes["provider_key"]); v != "" {
-					providerKey = strings.ToLower(v)
+					providerKey = v
 					isCompatAuth = true
 				}
 			}
-			for i := range s.cfg.OpenAICompatibility {
-				compat := &s.cfg.OpenAICompatibility[i]
-				if compat.Disabled {
-					continue
-				}
-				if strings.EqualFold(compat.Name, compatName) {
-					isCompatAuth = true
-					// Convert compatibility models to registry models
-					ms := make([]*ModelInfo, 0, len(compat.Models))
-					for j := range compat.Models {
-						m := compat.Models[j]
-						// Use alias as model ID, fallback to name if alias is empty
-						modelID := m.Alias
-						if modelID == "" {
-							modelID = m.Name
-						}
-						thinking := m.Thinking
-						if thinking == nil {
-							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
-						}
-						ms = append(ms, &ModelInfo{
-							ID:          modelID,
-							Object:      "model",
-							Created:     time.Now().Unix(),
-							OwnedBy:     compat.Name,
-							Type:        "openai-compatibility",
-							DisplayName: modelID,
-							UserDefined: false,
-							Thinking:    thinking,
-						})
+			if compat := config.ResolveOpenAICompatibilityEntry(s.cfg.OpenAICompatibility, providerKey, compatName, providerKey); compat != nil {
+				isCompatAuth = true
+				// Convert compatibility models to registry models
+				ms := make([]*ModelInfo, 0, len(compat.Models))
+				for j := range compat.Models {
+					m := compat.Models[j]
+					// Use alias as model ID, fallback to name if alias is empty
+					modelID := m.Alias
+					if modelID == "" {
+						modelID = m.Name
 					}
-					// Register and return
-					if len(ms) > 0 {
-						if providerKey == "" {
-							providerKey = "openai-compatibility"
-						}
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
-					} else {
-						// Ensure stale registrations are cleared when model list becomes empty.
-						GlobalModelRegistry().UnregisterClient(a.ID)
+					thinking := m.Thinking
+					if thinking == nil {
+						thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 					}
-					return
+					ms = append(ms, &ModelInfo{
+						ID:          modelID,
+						Object:      "model",
+						Created:     time.Now().Unix(),
+						OwnedBy:     compat.Name,
+						Type:        "openai-compatibility",
+						DisplayName: modelID,
+						UserDefined: false,
+						Thinking:    thinking,
+					})
 				}
+				// Register and return
+				if len(ms) > 0 {
+					if providerKey == "" {
+						providerKey = compatProviderKey
+					}
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+				} else {
+					// Ensure stale registrations are cleared when model list becomes empty.
+					GlobalModelRegistry().UnregisterClient(a.ID)
+				}
+				return
 			}
 			if isCompatAuth {
 				// No matching provider found or models removed entirely; drop any prior registration.

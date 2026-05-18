@@ -446,13 +446,13 @@ func openAICompatProviderKey(auth *Auth) string {
 	}
 	if auth.Attributes != nil {
 		if providerKey := strings.TrimSpace(auth.Attributes["provider_key"]); providerKey != "" {
-			return strings.ToLower(providerKey)
+			return providerKey
 		}
 		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
-			return strings.ToLower(compatName)
+			return internalconfig.OpenAICompatibilityProviderKey(compatName, auth.Prefix, auth.Attributes["base_url"])
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	return strings.TrimSpace(auth.Provider)
 }
 
 func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
@@ -1845,28 +1845,7 @@ func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatNa
 	if cfg == nil {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
-	if v := strings.TrimSpace(compatName); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(providerKey); v != "" {
-		candidates = append(candidates, v)
-	}
-	if v := strings.TrimSpace(authProvider); v != "" {
-		candidates = append(candidates, v)
-	}
-	for i := range cfg.OpenAICompatibility {
-		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
-		for _, candidate := range candidates {
-			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
-				return compat
-			}
-		}
-	}
-	return nil
+	return internalconfig.ResolveOpenAICompatibilityEntry(cfg.OpenAICompatibility, providerKey, compatName, authProvider)
 }
 
 func asModelAliasEntries[T interface {
@@ -2015,6 +1994,52 @@ func (m *Manager) retryAllowed(attempt int, providers []string) bool {
 	return false
 }
 
+func (m *Manager) compatStrategyOverrideForProviders(providers []string) *schedulerStrategy {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return nil
+	}
+	strategy, ok := parseBuiltInSchedulerStrategy(cfg.Routing.OpenAICompatibilityStrategy)
+	if !ok || !m.providersAreAllOpenAICompat(providers) {
+		return nil
+	}
+	return &strategy
+}
+
+func (m *Manager) providersAreAllOpenAICompat(providers []string) bool {
+	if m == nil {
+		return false
+	}
+	normalized := normalizeProviderKeys(providers)
+	if len(normalized) == 0 {
+		return false
+	}
+	providerSet := make(map[string]struct{}, len(normalized))
+	for _, provider := range normalized {
+		providerSet[provider] = struct{}{}
+	}
+	found := make(map[string]struct{}, len(normalized))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		if !isOpenAICompatAPIKeyAuth(auth) {
+			return false
+		}
+		found[providerKey] = struct{}{}
+	}
+	return len(found) == len(providerSet)
+}
+
 func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
@@ -2032,6 +2057,9 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
 		if wait > maxWait {
+			if m.providersAreAllOpenAICompat(providers) {
+				return 0, false
+			}
 			return maxWait, true
 		}
 		return wait, true
@@ -3053,12 +3081,13 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+	strategyOverride := m.compatStrategyOverrideForProviders([]string{provider})
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		selected, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, errPick
@@ -3202,6 +3231,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	strategyOverride := m.compatStrategyOverrideForProviders(eligibleProviders)
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
 		for _, providerKey := range eligibleProviders {
@@ -3228,10 +3258,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
@@ -3887,12 +3917,12 @@ func executorKeyFromAuth(auth *Auth) string {
 		compatName := strings.TrimSpace(auth.Attributes["compat_name"])
 		if compatName != "" {
 			if providerKey == "" {
-				providerKey = compatName
+				providerKey = internalconfig.OpenAICompatibilityProviderKey(compatName, auth.Prefix, auth.Attributes["base_url"])
 			}
-			return strings.ToLower(providerKey)
+			return providerKey
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	return strings.TrimSpace(auth.Provider)
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.

@@ -119,6 +119,9 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "fill-first" # round-robin (default), fill-first
+  # Optional override for OpenAI-compatible provider pools only.
+  # When omitted, OpenAI-compatible requests follow routing.strategy.
+  # openai-compatibility-strategy: "round-robin" # round-robin, fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
   # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
