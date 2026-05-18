@@ -667,6 +667,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		mgmt.GET("/ui-preferences", s.mgmt.GetUIPreferences)
+		mgmt.PUT("/ui-preferences", s.mgmt.PutUIPreferences)
 	}
 }
 

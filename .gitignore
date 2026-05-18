@@ -7,6 +7,7 @@ config.yaml
 test-config.yaml
 test-config-bak0512.yaml
 test-config-exp.yaml
+ui-preferences.json
 .env
 
 # Generated content
