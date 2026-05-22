@@ -108,11 +108,13 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
 
 # 3. Edit config.yaml — fill in api-keys, openai-compatibility, etc.
-#    Add this line to persist usage data:
-#      usage-db-path: "./data/usage.db"
+#    For Docker, use container paths (volume-mounted from host):
+#      auth-dir: "/cpa-plus/auths"
+#      log-dir: "/cpa-plus/logs"
+#      usage-db-path: "/cpa-plus/data/usage.db"
 
 # 4. Create required directories and start
-mkdir -p auths logs
+mkdir -p auths logs data
 docker compose up -d
 
 # 5. Open management dashboard

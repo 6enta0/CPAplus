@@ -8,11 +8,8 @@ services:
     ports:
       - "${CPA_PORT:-8317}:8317"
     volumes:
-      - ${CPA_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CPA_AUTH_PATH:-./auths}:/root/.cli-proxy-api
-      - ${CPA_LOG_PATH:-./logs}:/CLIProxyAPI/logs
-      - cpa-data:/CLIProxyAPI/data
+      - ${CPA_CONFIG_PATH:-./config.yaml}:/cpa-plus/config.yaml
+      - ${CPA_AUTH_PATH:-./auths}:/cpa-plus/auths
+      - ${CPA_LOG_PATH:-./logs}:/cpa-plus/logs
+      - ${CPA_DATA_PATH:-./data}:/cpa-plus/data
     restart: unless-stopped
-
-volumes:
-  cpa-data:

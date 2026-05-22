@@ -108,11 +108,13 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
 
 # 3. config.yamlを編集 — api-keys、openai-compatibilityなどを入力
-#    使用データを永続化するには以下の行を追加：
-#      usage-db-path: "./data/usage.db"
+#    Dockerデプロイではコンテナ内パスを使用（volumeでホストにマッピング）：
+#      auth-dir: "/cpa-plus/auths"
+#      log-dir: "/cpa-plus/logs"
+#      usage-db-path: "/cpa-plus/data/usage.db"
 
 # 4. 必要なディレクトリを作成して起動
-mkdir -p auths logs
+mkdir -p auths logs data
 docker compose up -d
 
 # 5. 管理ダッシュボードを開く

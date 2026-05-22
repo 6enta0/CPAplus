@@ -108,11 +108,13 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
 
 # 3. 编辑 config.yaml — 填入 api-keys、openai-compatibility 等
-#    添加以下行以持久化使用数据：
-#      usage-db-path: "./data/usage.db"
+#    Docker 部署请使用容器内路径（通过 volume 映射到宿主机）：
+#      auth-dir: "/cpa-plus/auths"
+#      log-dir: "/cpa-plus/logs"
+#      usage-db-path: "/cpa-plus/data/usage.db"
 
 # 4. 创建必要目录并启动
-mkdir -p auths logs
+mkdir -p auths logs data
 docker compose up -d
 
 # 5. 打开管理面板
