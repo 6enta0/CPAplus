@@ -106,20 +106,45 @@ mkdir cpa-plus && cd cpa-plus
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
+```
 
-# 3. config.yamlを編集 — api-keys、openai-compatibilityなどを入力
-#    Dockerデプロイではコンテナ内パスを使用（volumeでホストにマッピング）：
-#      auth-dir: "/cpa-plus/auths"
-#      log-dir: "/cpa-plus/logs"
-#      usage-db-path: "/cpa-plus/data/usage.db"
+その後、`config.yaml` を編集して実際の API/provider 設定を入力してください。
 
-# 4. 必要なディレクトリを作成して起動
+Docker デプロイで変更が必要な項目:
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
+- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+
+次の Docker 用パスとオプションはそのまま維持してください:
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+`logging-to-file: true` は任意です。有効にすると、`docker-compose.yml` の `WRITABLE_PATH=/cpa-plus` 経由でログがホストの `./logs` ディレクトリへ永続化されます。
+
+```bash
+# 3. 必要なディレクトリを作成して起動
 mkdir -p auths logs data
+
+# 4. 認証情報ファイルをホスト側の auths ディレクトリへコピー
+# ./auths はコンテナ内の /cpa-plus/auths にマウントされます
+
+# 5. サービスを起動
 docker compose up -d
 
-# 5. 管理ダッシュボードを開く
+# 6. 管理ダッシュボードを開く
 # http://localhost:8317/management.html
 ```
+
+サービスを起動する前に、認証情報ファイルをホスト側の `cpa-plus/auths/` ディレクトリへコピーしてください。このディレクトリはコンテナ内の `/cpa-plus/auths` にマウントされるため、置いたファイルは自動的に認識されます。認証情報ファイルに `refresh_token` が含まれている場合は、その項目を保持したままにしてください。誤って上書きすると自動リフレッシュが動かなくなる可能性があります。
 
 `docker compose up -d` で `ghcr.io/6enta0/cpaplus:latest` の取得時に `unauthorized` が表示される場合、GHCR Package がまだ private の可能性があります。GitHub Package ページで可視性を public に変更してください。
 
@@ -139,6 +164,21 @@ docker image prune -f
 ### 方法2：Goで直接実行（Cloneして実行）
 
 Goがインストール済みのユーザー向け。
+
+`go run` で変更が必要な項目:
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
+- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- ローカルプロセスが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+
+リポジトリのルートで `go run ./cmd/server --config config.yaml` を実行する場合は、`config.example.yaml` のローカルパス既定値をそのまま使えます:
+
+```yaml
+auth-dir: "./auths"
+usage-db-path: "./data/usage.db"
+```
+
+auth ファイルを使う場合は、認証情報をリポジトリの `auths/` ディレクトリへ配置し、既存の `refresh_token` フィールドは保持してください。
 
 ```bash
 # 1. リポジトリをClone
@@ -174,6 +214,26 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 ### 方法3：ソースからDockerイメージをビルド
 
 カスタマイズして独自イメージをビルドしたい開発者向け。
+
+この方法も実行時には方法1と同じ `docker-compose.yml` のマウント構成を使います。ビルド前に変更が必要な項目:
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
+- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+
+この Docker ベースの方法では、次のコンテナパスとオプションをそのまま維持してください:
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+認証情報ファイルはリポジトリの `auths/` ディレクトリへ置いてください。コンテナ内では `/cpa-plus/auths` にマウントされます。既存の `refresh_token` フィールドは上書きしないでください。
 
 ```bash
 # 1. リポジトリをClone

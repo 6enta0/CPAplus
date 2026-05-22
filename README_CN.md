@@ -106,20 +106,45 @@ mkdir cpa-plus && cd cpa-plus
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
+```
 
-# 3. 编辑 config.yaml — 填入 api-keys、openai-compatibility 等
-#    Docker 部署请使用容器内路径（通过 volume 映射到宿主机）：
-#      auth-dir: "/cpa-plus/auths"
-#      log-dir: "/cpa-plus/logs"
-#      usage-db-path: "/cpa-plus/data/usage.db"
+然后编辑 `config.yaml`，填入你实际的 API/provider 配置。
 
-# 4. 创建必要目录并启动
+Docker 部署需要改动的项：
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
+- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 只有容器确实需要出站代理时才设置 `proxy-url`
+
+下面这些 Docker 路径和选项请按原样保留：
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+`logging-to-file: true` 是可选项。启用后，日志会通过 `docker-compose.yml` 中的 `WRITABLE_PATH=/cpa-plus` 持久化到宿主机的 `./logs` 目录。
+
+```bash
+# 3. 创建必要目录并启动
 mkdir -p auths logs data
+
+# 4. 将凭证文件复制到宿主机 auths 目录
+# ./auths 会挂载到容器内的 /cpa-plus/auths
+
+# 5. 启动服务
 docker compose up -d
 
-# 5. 打开管理面板
+# 6. 打开管理面板
 # http://localhost:8317/management.html
 ```
+
+启动服务前，请将你的凭证文件复制到宿主机的 `cpa-plus/auths/` 目录中。这个目录会挂载到容器内的 `/cpa-plus/auths`，放进去的文件会被自动识别。如果某个凭证文件里已经带有 `refresh_token`，请保留该字段并留心不要误覆盖，否则自动刷新可能失效。
 
 如果 `docker compose up -d` 拉取 `ghcr.io/6enta0/cpaplus:latest` 时提示 `unauthorized`，说明 GHCR Package 可能仍是 private，需要在 GitHub Package 页面将其可见性改为 public。
 
@@ -139,6 +164,21 @@ docker image prune -f
 ### 方式二：Go 直接运行（Clone 后运行）
 
 适合已安装 Go 的用户。
+
+`go run` 方式需要改动的项：
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
+- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 只有本地进程确实需要出站代理时才设置 `proxy-url`
+
+如果你是在仓库根目录执行 `go run ./cmd/server --config config.yaml`，则可以保持 `config.example.yaml` 里的本地路径默认值不变：
+
+```yaml
+auth-dir: "./auths"
+usage-db-path: "./data/usage.db"
+```
+
+如果使用 auth 文件，请把凭证放到仓库根目录的 `auths/` 下，并保留其中已有的 `refresh_token` 字段。
 
 ```bash
 # 1. Clone 仓库
@@ -174,6 +214,26 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 ### 方式三：从源码构建 Docker 镜像
 
 适合想自定义并构建自己镜像的开发者。
+
+这种方式运行时仍然使用与方式一相同的 `docker-compose.yml` 挂载布局。构建前需要改动的项：
+- `api-keys`
+- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
+- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 只有容器确实需要出站代理时才设置 `proxy-url`
+
+下面这些容器路径和选项请按原样保留：
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+凭证文件放在仓库根目录的 `auths/` 下即可，容器内会映射到 `/cpa-plus/auths`。如果文件里已有 `refresh_token`，请保留不要覆盖。
 
 ```bash
 # 1. Clone 仓库

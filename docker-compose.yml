@@ -3,8 +3,11 @@ services:
     image: ${CPA_PLUS_IMAGE:-ghcr.io/6enta0/cpaplus:latest}
     pull_policy: always
     container_name: cpa-plus
+    command: ["./CLIProxyAPI", "--config", "/cpa-plus/config.yaml"]
     environment:
       DEPLOY: ${DEPLOY:-}
+      WRITABLE_PATH: /cpa-plus
+      MANAGEMENT_STATIC_PATH: /CLIProxyAPI/static
     ports:
       - "${CPA_PORT:-8317}:8317"
     volumes:

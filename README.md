@@ -106,20 +106,45 @@ mkdir cpa-plus && cd cpa-plus
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mv config.example.yaml config.yaml
+```
 
-# 3. Edit config.yaml — fill in api-keys, openai-compatibility, etc.
-#    For Docker, use container paths (volume-mounted from host):
-#      auth-dir: "/cpa-plus/auths"
-#      log-dir: "/cpa-plus/logs"
-#      usage-db-path: "/cpa-plus/data/usage.db"
+Then update `config.yaml` with your real API/provider settings.
 
-# 4. Create required directories and start
+Change these fields for Docker deployment:
+- `api-keys`
+- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
+- `remote-management.secret-key` if you want to open the management dashboard/API
+- `proxy-url` only if the container really needs an outbound proxy
+
+Keep these Docker-specific paths and options exactly as shown:
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+`logging-to-file: true` is optional. When enabled, logs are persisted to the host `./logs` directory through `WRITABLE_PATH=/cpa-plus` in `docker-compose.yml`.
+
+```bash
+# 3. Create required directories and start
 mkdir -p auths logs data
+
+# 4. Copy credential files into the host auths directory
+# Files in ./auths are mounted into the container as /cpa-plus/auths
+
+# 5. Start the service
 docker compose up -d
 
-# 5. Open management dashboard
+# 6. Open management dashboard
 # http://localhost:8317/management.html
 ```
+
+Before starting the service, copy your credential files into the host `cpa-plus/auths/` directory. It is mounted into the container as `/cpa-plus/auths`, so files placed there will be detected automatically. If a credential file already contains a `refresh_token`, keep that field intact and be careful not to overwrite it accidentally, or automatic refresh may stop working.
 
 If `docker compose up -d` reports `unauthorized` when pulling `ghcr.io/6enta0/cpaplus:latest`, the GHCR package may still be private. Open the package page and set visibility to public.
 
@@ -139,6 +164,21 @@ docker image prune -f
 ### Option 2: Go Run (Clone & Run)
 
 For users who want to run directly with Go.
+
+Change these fields for `go run`:
+- `api-keys`
+- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
+- `remote-management.secret-key` if you want to open the management dashboard/API
+- `proxy-url` only if your local process really needs an outbound proxy
+
+When running from the repo root with `go run ./cmd/server --config config.yaml`, you can keep the default local paths in `config.example.yaml` as-is:
+
+```yaml
+auth-dir: "./auths"
+usage-db-path: "./data/usage.db"
+```
+
+If you use auth files, place them in the repo's `auths/` directory and preserve any existing `refresh_token` fields.
 
 ```bash
 # 1. Clone the repo
@@ -174,6 +214,26 @@ After replacing `static/management.html`, hard-refresh the browser. A Go server 
 ### Option 3: Docker Build from Source
 
 For developers who want to customize and build their own image.
+
+This option uses the same `docker-compose.yml` runtime layout as Option 1. Change these fields before building:
+- `api-keys`
+- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
+- `remote-management.secret-key` if you want to open the management dashboard/API
+- `proxy-url` only if the container really needs an outbound proxy
+
+Keep these container paths exactly as shown for this Docker-based option:
+
+```yaml
+remote-management:
+  allow-remote: true
+  disable-auto-update-panel: true
+
+auth-dir: "/cpa-plus/auths"
+usage-db-path: "/cpa-plus/data/usage.db"
+logging-to-file: true
+```
+
+Put credential files in the repo's `auths/` directory before or after startup. They are mounted into the container as `/cpa-plus/auths`. Preserve any existing `refresh_token` fields.
 
 ```bash
 # 1. Clone the repo
