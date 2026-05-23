@@ -113,7 +113,7 @@ Then update `config.yaml` with your real API/provider settings.
 Change these fields for Docker deployment:
 - `api-keys`
 - upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` if you want to open the management dashboard/API
+- `remote-management.secret-key` for logging into the management dashboard/API
 - `proxy-url` only if the container really needs an outbound proxy
 
 Keep these Docker-specific paths and options exactly as shown:
@@ -122,6 +122,7 @@ Keep these Docker-specific paths and options exactly as shown:
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
@@ -129,6 +130,8 @@ logging-to-file: true
 ```
 
 `logging-to-file: true` is optional. When enabled, logs are persisted to the host `./logs` directory through `WRITABLE_PATH=/cpa-plus` in `docker-compose.yml`.
+
+Set `remote-management.secret-key` to the key you will use when logging into `management.html`.
 
 ```bash
 # 3. Create required directories and start
@@ -168,7 +171,7 @@ For users who want to run directly with Go.
 Change these fields for `go run`:
 - `api-keys`
 - upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` if you want to open the management dashboard/API
+- `remote-management.secret-key` for logging into the management dashboard/API
 - `proxy-url` only if your local process really needs an outbound proxy
 
 When running from the repo root with `go run ./cmd/server --config config.yaml`, you can keep the default local paths in `config.example.yaml` as-is:
@@ -218,7 +221,7 @@ For developers who want to customize and build their own image.
 This option uses the same `docker-compose.yml` runtime layout as Option 1. Change these fields before building:
 - `api-keys`
 - upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` if you want to open the management dashboard/API
+- `remote-management.secret-key` for logging into the management dashboard/API
 - `proxy-url` only if the container really needs an outbound proxy
 
 Keep these container paths exactly as shown for this Docker-based option:
@@ -227,11 +230,14 @@ Keep these container paths exactly as shown for this Docker-based option:
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
+
+Set `remote-management.secret-key` to the key you will use when logging into `management.html`.
 
 Put credential files in the repo's `auths/` directory before or after startup. They are mounted into the container as `/cpa-plus/auths`. Preserve any existing `refresh_token` fields.
 

@@ -113,7 +113,7 @@ mv config.example.yaml config.yaml
 Docker デプロイで変更が必要な項目:
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
 - コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
 
 次の Docker 用パスとオプションはそのまま維持してください:
@@ -122,6 +122,7 @@ Docker デプロイで変更が必要な項目:
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
@@ -129,6 +130,8 @@ logging-to-file: true
 ```
 
 `logging-to-file: true` は任意です。有効にすると、`docker-compose.yml` の `WRITABLE_PATH=/cpa-plus` 経由でログがホストの `./logs` ディレクトリへ永続化されます。
+
+`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。
 
 ```bash
 # 3. 必要なディレクトリを作成して起動
@@ -168,7 +171,7 @@ Goがインストール済みのユーザー向け。
 `go run` で変更が必要な項目:
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
 - ローカルプロセスが本当に外向きプロキシを必要とする場合のみ `proxy-url`
 
 リポジトリのルートで `go run ./cmd/server --config config.yaml` を実行する場合は、`config.example.yaml` のローカルパス既定値をそのまま使えます:
@@ -218,7 +221,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 この方法も実行時には方法1と同じ `docker-compose.yml` のマウント構成を使います。ビルド前に変更が必要な項目:
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- 管理ダッシュボード/API を使う場合は `remote-management.secret-key`
+- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
 - コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
 
 この Docker ベースの方法では、次のコンテナパスとオプションをそのまま維持してください:
@@ -227,11 +230,14 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
+
+`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。
 
 認証情報ファイルはリポジトリの `auths/` ディレクトリへ置いてください。コンテナ内では `/cpa-plus/auths` にマウントされます。既存の `refresh_token` フィールドは上書きしないでください。
 

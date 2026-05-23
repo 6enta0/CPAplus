@@ -113,7 +113,7 @@ mv config.example.yaml config.yaml
 Docker 部署需要改动的项：
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
 - 只有容器确实需要出站代理时才设置 `proxy-url`
 
 下面这些 Docker 路径和选项请按原样保留：
@@ -122,6 +122,7 @@ Docker 部署需要改动的项：
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
@@ -129,6 +130,8 @@ logging-to-file: true
 ```
 
 `logging-to-file: true` 是可选项。启用后，日志会通过 `docker-compose.yml` 中的 `WRITABLE_PATH=/cpa-plus` 持久化到宿主机的 `./logs` 目录。
+
+请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。
 
 ```bash
 # 3. 创建必要目录并启动
@@ -168,7 +171,7 @@ docker image prune -f
 `go run` 方式需要改动的项：
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
 - 只有本地进程确实需要出站代理时才设置 `proxy-url`
 
 如果你是在仓库根目录执行 `go run ./cmd/server --config config.yaml`，则可以保持 `config.example.yaml` 里的本地路径默认值不变：
@@ -218,7 +221,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 这种方式运行时仍然使用与方式一相同的 `docker-compose.yml` 挂载布局。构建前需要改动的项：
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 如果要打开管理面板/API，需要设置 `remote-management.secret-key`
+- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
 - 只有容器确实需要出站代理时才设置 `proxy-url`
 
 下面这些容器路径和选项请按原样保留：
@@ -227,11 +230,14 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 remote-management:
   allow-remote: true
   disable-auto-update-panel: true
+  secret-key: "your-management-key"
 
 auth-dir: "/cpa-plus/auths"
 usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
+
+请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。
 
 凭证文件放在仓库根目录的 `auths/` 下即可，容器内会映射到 `/cpa-plus/auths`。如果文件里已有 `refresh_token`，请保留不要覆盖。
 
