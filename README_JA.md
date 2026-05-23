@@ -114,7 +114,7 @@ Docker デプロイで変更が必要な項目:
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
 - `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
-- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`（コンテナは `network_mode: host` で動作するため、ホスト上のローカルプロキシは `http://127.0.0.1:7890` で指定できます）
 
 次の Docker 用パスとオプションはそのまま維持してください:
 
@@ -222,7 +222,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
 - `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
-- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`（コンテナは `network_mode: host` で動作するため、ホスト上のローカルプロキシは `http://127.0.0.1:7890` で指定できます）
 
 この Docker ベースの方法では、次のコンテナパスとオプションをそのまま維持してください:
 

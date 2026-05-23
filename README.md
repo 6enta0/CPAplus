@@ -114,7 +114,7 @@ Change these fields for Docker deployment:
 - `api-keys`
 - upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
 - `remote-management.secret-key` for logging into the management dashboard/API
-- `proxy-url` only if the container really needs an outbound proxy
+- `proxy-url` only if the container really needs an outbound proxy (the container uses `network_mode: host`, so a local proxy on the host can be set as `http://127.0.0.1:7890`)
 
 Keep these Docker-specific paths and options exactly as shown:
 
@@ -222,7 +222,7 @@ This option uses the same `docker-compose.yml` runtime layout as Option 1. Chang
 - `api-keys`
 - upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
 - `remote-management.secret-key` for logging into the management dashboard/API
-- `proxy-url` only if the container really needs an outbound proxy
+- `proxy-url` only if the container really needs an outbound proxy (the container uses `network_mode: host`, so a local proxy on the host can be set as `http://127.0.0.1:7890`)
 
 Keep these container paths exactly as shown for this Docker-based option:
 

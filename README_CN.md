@@ -114,7 +114,7 @@ Docker 部署需要改动的项：
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
 - 需要设置 `remote-management.secret-key`，用于登录管理面板/API
-- 只有容器确实需要出站代理时才设置 `proxy-url`
+- 只有容器确实需要出站代理时才设置 `proxy-url`（容器使用 `network_mode: host`，可直接用 `http://127.0.0.1:7890` 指向宿主机本地代理）
 
 下面这些 Docker 路径和选项请按原样保留：
 
@@ -222,7 +222,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 - `api-keys`
 - `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
 - 需要设置 `remote-management.secret-key`，用于登录管理面板/API
-- 只有容器确实需要出站代理时才设置 `proxy-url`
+- 只有容器确实需要出站代理时才设置 `proxy-url`（容器使用 `network_mode: host`，可直接用 `http://127.0.0.1:7890` 指向宿主机本地代理）
 
 下面这些容器路径和选项请按原样保留：
 

@@ -8,8 +8,9 @@ services:
       DEPLOY: ${DEPLOY:-}
       WRITABLE_PATH: /cpa-plus
       MANAGEMENT_STATIC_PATH: /CLIProxyAPI/static
-    ports:
-      - "${CPA_PORT:-8317}:8317"
+    # Host networking so proxy-url can reach a local proxy on the host (e.g. http://127.0.0.1:7890)
+    # and the listen port from config.yaml binds directly to the host.
+    network_mode: host
     volumes:
       - ${CPA_CONFIG_PATH:-./config.yaml}:/cpa-plus/config.yaml
       - ${CPA_AUTH_PATH:-./auths}:/cpa-plus/auths
