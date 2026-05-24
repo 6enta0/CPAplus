@@ -215,6 +215,55 @@ func TestResolveOpenAICompatConfig_PrefersCompositeProviderKey(t *testing.T) {
 	}
 }
 
+func TestManager_Execute_OpenAICompatBootstrapTimeoutFallsBackToNextProvider(t *testing.T) {
+	badExecutor := &compatBootstrapTimeoutExecutor{id: "compat-a", blockExecute: true}
+	goodExecutor := &compatBootstrapTimeoutExecutor{id: "compat-b"}
+	m := newCompatBootstrapTimeoutTestManager(t, "20ms", badExecutor, goodExecutor, nil, nil)
+
+	resp, errExecute := m.Execute(context.Background(), []string{"compat-a", "compat-b"}, cliproxyexecutor.Request{Model: "deepseek/deepseek-v4-flash"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v, want success", errExecute)
+	}
+	if got := string(resp.Payload); got != "bb-good-auth" {
+		t.Fatalf("Execute() payload = %q, want %q", got, "bb-good-auth")
+	}
+
+	if got := badExecutor.ExecuteCalls(); len(got) != 1 || got[0] != "aa-bad-auth" {
+		t.Fatalf("bad executor calls = %v, want [aa-bad-auth]", got)
+	}
+	if got := goodExecutor.ExecuteCalls(); len(got) != 1 || got[0] != "bb-good-auth" {
+		t.Fatalf("good executor calls = %v, want [bb-good-auth]", got)
+	}
+}
+
+func TestManager_ExecuteStream_OpenAICompatBootstrapTimeoutFallsBackToNextProvider(t *testing.T) {
+	badExecutor := &compatBootstrapTimeoutExecutor{id: "compat-a", silentBootstrap: true}
+	goodExecutor := &compatBootstrapTimeoutExecutor{id: "compat-b"}
+	m := newCompatBootstrapTimeoutTestManager(t, "20ms", badExecutor, goodExecutor, nil, nil)
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"compat-a", "compat-b"}, cliproxyexecutor.Request{Model: "deepseek/deepseek-v4-flash"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v, want success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if got := string(payload); got != "bb-good-auth" {
+		t.Fatalf("stream payload = %q, want %q", got, "bb-good-auth")
+	}
+
+	if got := badExecutor.StreamCalls(); len(got) != 1 || got[0] != "aa-bad-auth" {
+		t.Fatalf("bad executor stream calls = %v, want [aa-bad-auth]", got)
+	}
+	if got := goodExecutor.StreamCalls(); len(got) != 1 || got[0] != "bb-good-auth" {
+		t.Fatalf("good executor stream calls = %v, want [bb-good-auth]", got)
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
@@ -331,6 +380,87 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 	return out
 }
 
+type compatBootstrapTimeoutExecutor struct {
+	id string
+
+	mu              sync.Mutex
+	executeCalls    []string
+	streamCalls     []string
+	blockExecute    bool
+	silentBootstrap bool
+}
+
+func (e *compatBootstrapTimeoutExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *compatBootstrapTimeoutExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, authID)
+	block := e.blockExecute
+	e.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return cliproxyexecutor.Response{}, ctx.Err()
+	}
+	return cliproxyexecutor.Response{Payload: []byte(authID)}, nil
+}
+
+func (e *compatBootstrapTimeoutExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.streamCalls = append(e.streamCalls, authID)
+	silent := e.silentBootstrap
+	e.mu.Unlock()
+
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	if silent {
+		go func() {
+			<-ctx.Done()
+			close(ch)
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Auth": {authID}}, Chunks: ch}, nil
+	}
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(authID)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Auth": {authID}}, Chunks: ch}, nil
+}
+
+func (e *compatBootstrapTimeoutExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *compatBootstrapTimeoutExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "not implemented"}
+}
+
+func (e *compatBootstrapTimeoutExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *compatBootstrapTimeoutExecutor) ExecuteCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeCalls))
+	copy(out, e.executeCalls)
+	return out
+}
+
+func (e *compatBootstrapTimeoutExecutor) StreamCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.streamCalls))
+	copy(out, e.streamCalls)
+	return out
+}
+
 type retryAfterStatusError struct {
 	status     int
 	message    string
@@ -417,6 +547,69 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	}
 
 	return m, executor
+}
+
+func newCompatBootstrapTimeoutTestManager(t *testing.T, timeout string, badExec, badStream *compatBootstrapTimeoutExecutor, goodExec, goodStream *compatBootstrapTimeoutExecutor) *Manager {
+	t.Helper()
+
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.SetConfig(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy:                            "fill-first",
+			OpenAICompatibilityStrategy:         "fill-first",
+			OpenAICompatibilityBootstrapTimeout: timeout,
+		},
+	})
+
+	if badExec != nil {
+		m.RegisterExecutor(badExec)
+	}
+	if goodExec != nil && goodExec != badExec {
+		m.RegisterExecutor(goodExec)
+	}
+	if badStream != nil && badStream != badExec && badStream != goodExec {
+		m.RegisterExecutor(badStream)
+	}
+	if goodStream != nil && goodStream != badExec && goodStream != goodExec && goodStream != badStream {
+		m.RegisterExecutor(goodStream)
+	}
+
+	model := "deepseek/deepseek-v4-flash"
+	badAuth := &Auth{
+		ID:       "aa-bad-auth",
+		Provider: "compat-a",
+		Attributes: map[string]string{
+			"api_key":      "sk-a",
+			"compat_name":  "compat-a",
+			"provider_key": "compat-a",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "bb-good-auth",
+		Provider: "compat-b",
+		Attributes: map[string]string{
+			"api_key":      "sk-b",
+			"compat_name":  "compat-b",
+			"provider_key": "compat-b",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "compat-a", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "compat-b", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	return m
 }
 
 func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) {

@@ -765,8 +765,19 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 }
 
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+	return readStreamBootstrapWithTimeout(ctx, ch, 0)
+}
+
+func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, timeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
+	}
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timeoutCh = timer.C
+		defer timer.Stop()
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
 	for {
@@ -778,10 +789,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			select {
 			case <-ctx.Done():
 				return nil, false, ctx.Err()
+			case <-timeoutCh:
+				return nil, false, newOpenAICompatBootstrapTimeoutError(timeout)
 			case chunk, ok = <-ch:
 			}
 		} else {
-			chunk, ok = <-ch
+			select {
+			case <-timeoutCh:
+				return nil, false, newOpenAICompatBootstrapTimeoutError(timeout)
+			case chunk, ok = <-ch:
+			}
 		}
 		if !ok {
 			return buffered, true, nil
@@ -794,6 +811,36 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return buffered, false, nil
 		}
 	}
+}
+
+func newOpenAICompatBootstrapTimeoutError(timeout time.Duration) error {
+	return &Error{
+		Code:       "bootstrap_timeout",
+		Message:    fmt.Sprintf("openai-compatible provider timed out before first payload after %s", timeout),
+		Retryable:  true,
+		HTTPStatus: http.StatusGatewayTimeout,
+	}
+}
+
+func (m *Manager) openAICompatBootstrapTimeoutForAuth(auth *Auth) time.Duration {
+	if m == nil || !isOpenAICompatAPIKeyAuth(auth) {
+		return 0
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return 0
+	}
+	return parseDurationString(cfg.Routing.OpenAICompatibilityBootstrapTimeout)
+}
+
+func normalizeCompatBootstrapAttemptError(parentCtx, attemptCtx context.Context, timeout time.Duration, err error) (error, bool) {
+	if parentCtx != nil && parentCtx.Err() != nil {
+		return parentCtx.Err(), true
+	}
+	if timeout > 0 && attemptCtx != nil && errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+		return newOpenAICompatBootstrapTimeoutError(timeout), false
+	}
+	return err, false
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
@@ -850,15 +897,28 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	bootstrapTimeout := m.openAICompatBootstrapTimeoutForAuth(auth)
 	var lastErr error
 	for idx, execModel := range execModels {
+		attemptCtx := ctx
+		attemptCancel := func() {}
+		if bootstrapTimeout > 0 {
+			if attemptCtx == nil {
+				attemptCtx = context.Background()
+			}
+			attemptCtx, attemptCancel = context.WithCancel(attemptCtx)
+			attemptCtx = cliproxyexecutor.WithOpenAICompatBootstrapTimeout(attemptCtx, bootstrapTimeout)
+		}
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, opts)
 		if errStream != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
-				return nil, errCtx
+			attemptCancel()
+			if normalizedErr, abort := normalizeCompatBootstrapAttemptError(ctx, attemptCtx, bootstrapTimeout, errStream); abort {
+				return nil, normalizedErr
+			} else {
+				errStream = normalizedErr
 			}
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
@@ -874,11 +934,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrapWithTimeout(attemptCtx, streamResult.Chunks, bootstrapTimeout)
 		if bootstrapErr != nil {
-			if errCtx := ctx.Err(); errCtx != nil {
+			attemptCancel()
+			if normalizedErr, abort := normalizeCompatBootstrapAttemptError(ctx, attemptCtx, bootstrapTimeout, bootstrapErr); abort {
 				discardStreamChunks(streamResult.Chunks)
-				return nil, errCtx
+				return nil, normalizedErr
+			} else {
+				bootstrapErr = normalizedErr
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
@@ -915,6 +978,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
+			attemptCancel()
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
@@ -931,7 +995,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1350,15 +1414,27 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		bootstrapTimeout := m.openAICompatBootstrapTimeoutForAuth(auth)
 		for _, upstreamModel := range models {
+			attemptCtx := execCtx
+			cancel := func() {}
+			if bootstrapTimeout > 0 {
+				if attemptCtx == nil {
+					attemptCtx = context.Background()
+				}
+				attemptCtx, cancel = context.WithTimeout(attemptCtx, bootstrapTimeout)
+			}
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			resp, errExec := executor.Execute(attemptCtx, auth, execReq, opts)
+			cancel()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
-					return cliproxyexecutor.Response{}, errCtx
+				if normalizedErr, abort := normalizeCompatBootstrapAttemptError(ctx, attemptCtx, bootstrapTimeout, errExec); abort {
+					return cliproxyexecutor.Response{}, normalizedErr
+				} else {
+					errExec = normalizedErr
 				}
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {

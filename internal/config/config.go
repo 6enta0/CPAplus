@@ -236,6 +236,11 @@ type RoutingConfig struct {
 	// Supported values: "round-robin", "fill-first".
 	OpenAICompatibilityStrategy string `yaml:"openai-compatibility-strategy,omitempty" json:"openai-compatibility-strategy,omitempty"`
 
+	// OpenAICompatibilityBootstrapTimeout limits how long a single OpenAI-compatible
+	// provider attempt may wait before producing its first usable response payload.
+	// <= 0 disables the timeout. Accepts duration strings like "45s" or "1m".
+	OpenAICompatibilityBootstrapTimeout string `yaml:"openai-compatibility-bootstrap-timeout,omitempty" json:"openai-compatibility-bootstrap-timeout,omitempty"`
+
 	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
 	// When enabled, requests with the same session ID (extracted from metadata.user_id)
 	// are routed to the same auth credential when available.

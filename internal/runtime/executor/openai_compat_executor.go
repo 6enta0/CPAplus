@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -335,8 +338,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	bootstrapTimeout := cliproxyexecutor.OpenAICompatBootstrapTimeout(ctx)
+	httpClient = applyResponseHeaderTimeout(httpClient, bootstrapTimeout)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
+		if bootstrapTimeout > 0 && isBootstrapTimeoutTransportError(err) {
+			timeoutErr := newOpenAICompatBootstrapTimeoutStatusErr(bootstrapTimeout)
+			helps.RecordAPIResponseError(ctx, e.cfg, timeoutErr)
+			helps.LogWithRequestID(ctx).Warnf("openai compat executor: bootstrap timeout before response headers after %s", bootstrapTimeout)
+			return nil, timeoutErr
+		}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
@@ -351,6 +362,100 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, 52_428_800) // 50MB
+	var param any
+	var latestUsage usage.Detail
+	hasUsage := false
+	processLine := func(line []byte) ([][]byte, error) {
+		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+		if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			latestUsage = detail
+			hasUsage = true
+		}
+		trimmedLine := bytes.TrimSpace(line)
+		if len(trimmedLine) == 0 {
+			return nil, nil
+		}
+		if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+			if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+				bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+				return nil, nil
+			}
+			if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+				return nil, statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+			}
+			return nil, nil
+		}
+		return sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param), nil
+	}
+
+	var bootstrapTimedOut atomic.Bool
+	stopBootstrapTimer := func() {}
+	if bootstrapTimeout > 0 {
+		var stopOnce sync.Once
+		stopCh := make(chan struct{})
+		timer := time.NewTimer(bootstrapTimeout)
+		go func() {
+			select {
+			case <-timer.C:
+				bootstrapTimedOut.Store(true)
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("openai compat executor: close response body on bootstrap timeout error: %v", errClose)
+				}
+			case <-stopCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			}
+		}()
+		stopBootstrapTimer = func() {
+			stopOnce.Do(func() { close(stopCh) })
+		}
+	}
+
+	bufferedPayloads := make([][]byte, 0, 1)
+	for scanner.Scan() {
+		chunks, errProcess := processLine(scanner.Bytes())
+		if errProcess != nil {
+			stopBootstrapTimer()
+			helps.RecordAPIResponseError(ctx, e.cfg, errProcess)
+			reporter.PublishFailure(ctx)
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			}
+			return nil, errProcess
+		}
+		if len(chunks) == 0 {
+			continue
+		}
+		bufferedPayloads = append(bufferedPayloads, chunks...)
+		stopBootstrapTimer()
+		break
+	}
+	if len(bufferedPayloads) == 0 {
+		stopBootstrapTimer()
+		if bootstrapTimedOut.Load() {
+			timeoutErr := newOpenAICompatBootstrapTimeoutStatusErr(bootstrapTimeout)
+			helps.RecordAPIResponseError(ctx, e.cfg, timeoutErr)
+			helps.LogWithRequestID(ctx).Warnf("openai compat executor: bootstrap timeout before first payload after %s", bootstrapTimeout)
+			reporter.PublishFailure(ctx)
+			return nil, timeoutErr
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
+			return nil, errScan
+		}
+		// In case the upstream close the stream without a terminal [DONE] marker.
+		// Feed a synthetic done marker through the translator so pending
+		// response.completed events are still emitted exactly once.
+		bufferedPayloads = sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -359,43 +464,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
-		var param any
-		var latestUsage usage.Detail
-		hasUsage := false
+		for i := range bufferedPayloads {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: bufferedPayloads[i]}:
+			case <-ctx.Done():
+				return
+			}
+		}
 		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				latestUsage = detail
-				hasUsage = true
-			}
-			trimmedLine := bytes.TrimSpace(line)
-			if len(trimmedLine) == 0 {
-				continue
-			}
-
-			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
-				if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
-					bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
-					continue
+			chunks, errProcess := processLine(scanner.Bytes())
+			if errProcess != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errProcess)
+				reporter.PublishFailure(ctx)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errProcess}:
+				case <-ctx.Done():
 				}
-				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-					reporter.PublishFailure(ctx)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-					case <-ctx.Done():
-					}
-					return
-				}
-				continue
+				return
 			}
-
-			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -411,24 +497,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
-		} else {
-			// In case the upstream close the stream without a terminal [DONE] marker.
-			// Feed a synthetic done marker through the translator so pending
-			// response.completed events are still emitted exactly once.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
-				}
+			return
+		}
+		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+		for i := range chunks {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+			case <-ctx.Done():
+				return
 			}
 		}
 		if hasUsage {
 			reporter.Publish(ctx, latestUsage)
 			return
 		}
-		// Ensure we record the request if no usage chunk was ever seen.
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -461,6 +543,46 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	usageJSON := helps.BuildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
+}
+
+func applyResponseHeaderTimeout(client *http.Client, timeout time.Duration) *http.Client {
+	if client == nil || timeout <= 0 {
+		return client
+	}
+	cloned := *client
+	switch transport := client.Transport.(type) {
+	case nil:
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr := base.Clone()
+			tr.ResponseHeaderTimeout = timeout
+			cloned.Transport = tr
+			return &cloned
+		}
+	case *http.Transport:
+		tr := transport.Clone()
+		tr.ResponseHeaderTimeout = timeout
+		cloned.Transport = tr
+		return &cloned
+	}
+	return client
+}
+
+func isBootstrapTimeoutTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type timeout interface {
+		Timeout() bool
+	}
+	var timeoutErr timeout
+	return errors.As(err, &timeoutErr) && timeoutErr.Timeout()
+}
+
+func newOpenAICompatBootstrapTimeoutStatusErr(timeout time.Duration) error {
+	return statusErr{
+		code: http.StatusGatewayTimeout,
+		msg:  fmt.Sprintf("openai-compatible provider timed out before first payload after %s", timeout),
+	}
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

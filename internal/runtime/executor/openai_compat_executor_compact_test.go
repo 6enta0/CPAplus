@@ -175,15 +175,13 @@ func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T)
 		SourceFormat: sdktranslator.FromString("openai"),
 		Stream:       true,
 	})
-	if err != nil {
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
-
-	var gotErr error
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			gotErr = chunk.Err
-			break
+	gotErr := err
+	if gotErr == nil && result != nil {
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				gotErr = chunk.Err
+				break
+			}
 		}
 	}
 	if gotErr == nil {
@@ -287,5 +285,70 @@ func TestOpenAICompatExecutorStreamPublishesLastUsageChunk(t *testing.T) {
 	}
 	if got := record.Detail.TotalTokens; got != 12 {
 		t.Fatalf("total tokens = %d, want 12", got)
+	}
+}
+
+func TestOpenAICompatExecutorStreamBootstrapTimeoutBeforeHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	ctx := cliproxyexecutor.WithOpenAICompatBootstrapTimeout(context.Background(), 20*time.Millisecond)
+	_, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "stream-model",
+		Payload: []byte(`{"model":"stream-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err == nil {
+		t.Fatal("expected bootstrap timeout error")
+	}
+	if status, ok := err.(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusGatewayTimeout {
+		t.Fatalf("status = %v, want %d", err, http.StatusGatewayTimeout)
+	}
+	if !strings.Contains(err.Error(), "timed out before first payload") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenAICompatExecutorStreamBootstrapTimeoutBeforeFirstPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		time.Sleep(80 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	ctx := cliproxyexecutor.WithOpenAICompatBootstrapTimeout(context.Background(), 20*time.Millisecond)
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "stream-model",
+		Payload: []byte(`{"model":"stream-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err == nil {
+		t.Fatal("expected bootstrap timeout error")
+	}
+	if result != nil {
+		t.Fatalf("expected nil result on bootstrap timeout, got %#v", result)
+	}
+	if status, ok := err.(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusGatewayTimeout {
+		t.Fatalf("status = %v, want %d", err, http.StatusGatewayTimeout)
 	}
 }
