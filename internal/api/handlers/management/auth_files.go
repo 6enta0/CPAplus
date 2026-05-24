@@ -348,6 +348,14 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						fileData["note"] = trimmed
 					}
 				}
+				for _, key := range lastRefreshKeys {
+					if raw := gjson.GetBytes(data, key); raw.Exists() {
+						if ts, ok := parseLastRefreshValue(raw.Value()); ok {
+							fileData["last_refresh"] = ts
+							break
+						}
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -423,6 +431,8 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
+	} else if ts, ok := extractLastRefreshTimestamp(auth.Metadata); ok {
+		entry["last_refresh"] = ts
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
