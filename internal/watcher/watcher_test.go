@@ -321,6 +321,74 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	}
 }
 
+// TestStartReloadsOnAtomicRename verifies that an atomic save (write temp file +
+// rename over the config) triggers hot-reload. Editors like vim default to this
+// pattern, which assigns a new inode and would defeat a file-level watch.
+func TestStartReloadsOnAtomicRename(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		cfg := &config.Config{Port: port, AuthDir: authDir}
+		data, err := yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("failed to marshal config: %v", err)
+		}
+		// Atomic save: write to a sibling temp file, then rename over the target.
+		tmp := configPath + ".tmp"
+		if err = os.WriteFile(tmp, data, 0o644); err != nil {
+			t.Fatalf("failed to write temp config: %v", err)
+		}
+		if err = os.Rename(tmp, configPath); err != nil {
+			t.Fatalf("failed to rename config: %v", err)
+		}
+	}
+
+	writeConfig(8080)
+
+	reloads := make(chan int, 16)
+	var count int32
+	w, err := NewWatcher(configPath, authDir, func(*config.Config) {
+		reloads <- int(atomic.AddInt32(&count, 1))
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer w.Stop()
+	w.SetConfig(&config.Config{Port: 8080, AuthDir: authDir})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+
+	// Drain the initial reload triggered by Start.
+	select {
+	case <-reloads:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial reload")
+	}
+
+	// Atomically replace the config with changed content.
+	writeConfig(9090)
+
+	select {
+	case <-reloads:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for reload after atomic rename")
+	}
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 {
+		t.Fatalf("expected config to be updated to port 9090 after atomic rename, got %+v", w.config)
+	}
+}
+
 func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
 	queue := make(chan AuthUpdate, 4)
 	w := &Watcher{}

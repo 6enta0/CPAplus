@@ -27,11 +27,23 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
-		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
+	// Fail fast if the configured config file is missing.
+	if _, errStat := os.Stat(w.configPath); errStat != nil {
+		log.Errorf("failed to stat config file %s: %v", w.configPath, errStat)
+		return errStat
+	}
+	// Watch the config file's parent directory instead of the file itself.
+	// Editors and atomic writers (e.g. vim's default rename-on-save) replace the
+	// file via rename, which assigns a new inode and silently breaks a file-level
+	// watch. The same rename is invisible across a Docker single-file bind mount.
+	// Watching the directory captures these renames reliably; handleEvent filters
+	// events down to the config path.
+	configDir := filepath.Dir(w.configPath)
+	if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
+		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
 		return errAddConfig
 	}
-	log.Debugf("watching config file: %s", w.configPath)
+	log.Debugf("watching config directory: %s (for %s)", configDir, w.configPath)
 
 	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
 		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)

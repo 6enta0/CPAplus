@@ -33,6 +33,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `.env` is auto-loaded from the working directory
 - Auth material defaults under `auths/`
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
+- Hot-reload watches the config file's parent directory (not the file inode), so atomic editor saves and renames are detected. Under Docker, mount the directory that holds `config.yaml` (see `docker-compose.yml` `CPA_CONFIG_DIR`); single-file bind mounts pin one inode and break hot-reload.
 
 ## Architecture
 - `cmd/server/` — Server entrypoint

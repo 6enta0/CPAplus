@@ -3,7 +3,7 @@ services:
     image: ${CPA_PLUS_IMAGE:-ghcr.io/6enta0/cpaplus:latest}
     pull_policy: always
     container_name: cpa-plus
-    command: ["./CLIProxyAPI", "--config", "/cpa-plus/config.yaml"]
+    command: ["./CLIProxyAPI", "--config", "/cpa-plus/config/config.yaml"]
     environment:
       DEPLOY: ${DEPLOY:-}
       WRITABLE_PATH: /cpa-plus
@@ -12,7 +12,11 @@ services:
     # and the listen port from config.yaml binds directly to the host.
     network_mode: host
     volumes:
-      - ${CPA_CONFIG_PATH:-./config.yaml}:/cpa-plus/config.yaml
+      # Mount the directory that holds config.yaml, not the file itself. Single-file
+      # bind mounts pin the container to one inode, so atomic editor saves (vim, etc.)
+      # and the file watcher's rename detection break, defeating config hot-reload.
+      # Place config.yaml under this directory (default ./config/config.yaml).
+      - ${CPA_CONFIG_DIR:-./config}:/cpa-plus/config
       - ${CPA_AUTH_PATH:-./auths}:/cpa-plus/auths
       - ${CPA_LOG_PATH:-./logs}:/cpa-plus/logs
       - ${CPA_DATA_PATH:-./data}:/cpa-plus/data
