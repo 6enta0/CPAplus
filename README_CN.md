@@ -105,10 +105,10 @@ mkdir cpa-plus && cd cpa-plus
 # 2. 下载配置模板和 docker-compose 文件
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
-mv config.example.yaml config.yaml
+mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-然后编辑 `config.yaml`，填入你实际的 API/provider 配置。
+然后编辑 `config/config.yaml`，填入你实际的 API/provider 配置。
 
 Docker 部署需要改动的项：
 - `api-keys`
@@ -162,7 +162,9 @@ docker compose up -d
 docker image prune -f
 ```
 
-`docker compose pull` 会下载最新的 `ghcr.io/6enta0/cpaplus:latest` 镜像，`docker compose up -d` 会用新镜像重建容器，同时保留已挂载的 `config.yaml`、`auths/`、`logs/` 和 `data/` 数据。
+`docker compose pull` 会下载最新的 `ghcr.io/6enta0/cpaplus:latest` 镜像，`docker compose up -d` 会用新镜像重建容器，同时保留已挂载的 `config/`、`auths/`、`logs/` 和 `data/` 数据。
+
+> **迁移提示：** `docker-compose.yml` 现在挂载的是 `config/` 目录而非单个 `config.yaml` 文件，这样编辑器保存和管理面板写入都能可靠触发配置热重载（单文件 bind mount 会把容器钉死在一个 inode 上，导致热重载失效）。如果你是在此改动之前部署的，请将文件移入目录一次：`mkdir -p config && mv config.yaml config/config.yaml`，然后执行 `docker compose up -d`。
 
 ### 方式二：Go 直接运行（Clone 后运行）
 
@@ -247,7 +249,7 @@ git clone https://github.com/6enta0/CPAplus.git
 cd CPAplus
 
 # 2. 复制并编辑配置
-cp config.example.yaml config.yaml
+mkdir config && cp config.example.yaml config/config.yaml
 
 # 3. 构建并启动
 ./docker-build.sh   # 选择 2

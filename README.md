@@ -105,10 +105,10 @@ mkdir cpa-plus && cd cpa-plus
 # 2. Download config template and docker-compose file
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
-mv config.example.yaml config.yaml
+mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-Then update `config.yaml` with your real API/provider settings.
+Then update `config/config.yaml` with your real API/provider settings.
 
 Change these fields for Docker deployment:
 - `api-keys`
@@ -162,7 +162,9 @@ docker compose up -d
 docker image prune -f
 ```
 
-`docker compose pull` downloads the newest `ghcr.io/6enta0/cpaplus:latest` image, and `docker compose up -d` recreates the container with that image while keeping your mounted `config.yaml`, `auths/`, `logs/`, and `data/` files.
+`docker compose pull` downloads the newest `ghcr.io/6enta0/cpaplus:latest` image, and `docker compose up -d` recreates the container with that image while keeping your mounted `config/`, `auths/`, `logs/`, and `data/` files.
+
+> **Migration note:** `docker-compose.yml` now mounts the `config/` directory instead of a single `config.yaml` file, so editor saves and the management panel reliably trigger config hot-reload (a single-file bind mount pins one inode and breaks it). If you deployed before this change, move your file into the directory once: `mkdir -p config && mv config.yaml config/config.yaml`, then `docker compose up -d`.
 
 ### Option 2: Go Run (Clone & Run)
 
@@ -247,7 +249,7 @@ git clone https://github.com/6enta0/CPAplus.git
 cd CPAplus
 
 # 2. Copy and edit config
-cp config.example.yaml config.yaml
+mkdir config && cp config.example.yaml config/config.yaml
 
 # 3. Build and start
 ./docker-build.sh   # Choose option 2

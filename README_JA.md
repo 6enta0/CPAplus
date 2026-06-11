@@ -105,10 +105,10 @@ mkdir cpa-plus && cd cpa-plus
 # 2. 設定テンプレートとdocker-composeファイルをダウンロード
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/config.example.yaml
 curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
-mv config.example.yaml config.yaml
+mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-その後、`config.yaml` を編集して実際の API/provider 設定を入力してください。
+その後、`config/config.yaml` を編集して実際の API/provider 設定を入力してください。
 
 Docker デプロイで変更が必要な項目:
 - `api-keys`
@@ -162,7 +162,9 @@ docker compose up -d
 docker image prune -f
 ```
 
-`docker compose pull` は最新の `ghcr.io/6enta0/cpaplus:latest` イメージを取得し、`docker compose up -d` はそのイメージでコンテナを再作成します。マウント済みの `config.yaml`、`auths/`、`logs/`、`data/` は保持されます。
+`docker compose pull` は最新の `ghcr.io/6enta0/cpaplus:latest` イメージを取得し、`docker compose up -d` はそのイメージでコンテナを再作成します。マウント済みの `config/`、`auths/`、`logs/`、`data/` は保持されます。
+
+> **移行に関する注意:** `docker-compose.yml` は単一の `config.yaml` ファイルではなく `config/` ディレクトリをマウントするようになりました。これにより、エディタでの保存や管理パネルからの書き込みが設定のホットリロードを確実にトリガーします（単一ファイルの bind mount は 1 つの inode に固定され、ホットリロードが壊れます）。この変更より前にデプロイした場合は、一度だけファイルをディレクトリへ移動してください: `mkdir -p config && mv config.yaml config/config.yaml`、その後 `docker compose up -d` を実行します。
 
 ### 方法2：Goで直接実行（Cloneして実行）
 
@@ -247,7 +249,7 @@ git clone https://github.com/6enta0/CPAplus.git
 cd CPAplus
 
 # 2. 設定をコピーして編集
-cp config.example.yaml config.yaml
+mkdir config && cp config.example.yaml config/config.yaml
 
 # 3. ビルドして起動
 ./docker-build.sh   # 2を選択
