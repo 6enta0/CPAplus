@@ -850,6 +850,84 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 }
 
+func TestManager_MarkResult_TransientFailureExponentialBackoff(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-transient", Provider: "claude"}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	model := "transient-model"
+
+	// HTTPStatus 0 mirrors a dial/connection timeout (no HTTP status) and lands in
+	// the default branch; 408/5xx land in the explicit transient branch. Both must
+	// back off exponentially via applyTransientModelCooldown.
+	markFailure := func() (time.Time, *ModelState) {
+		t.Helper()
+		before := time.Now()
+		m.MarkResult(context.Background(), Result{
+			AuthID:   auth.ID,
+			Provider: "claude",
+			Model:    model,
+			Success:  false,
+			Error:    &Error{HTTPStatus: 0, Message: "dial tcp: i/o timeout"},
+		})
+		updated, ok := m.GetByID(auth.ID)
+		if !ok || updated == nil {
+			t.Fatalf("expected auth to be present")
+		}
+		state := updated.ModelStates[model]
+		if state == nil {
+			t.Fatalf("expected model state to be present")
+		}
+		return before, state
+	}
+
+	// Consecutive transient failures: 1, 2, 4, 8, 16, then capped at 30 minutes.
+	expected := []time.Duration{
+		1 * time.Minute, 2 * time.Minute, 4 * time.Minute,
+		8 * time.Minute, 16 * time.Minute, 30 * time.Minute, 30 * time.Minute,
+	}
+	for i, want := range expected {
+		before, state := markFailure()
+		delta := state.NextRetryAfter.Sub(before)
+		if delta < want-time.Second || delta > want+5*time.Second {
+			t.Fatalf("failure #%d: NextRetryAfter delta = %v, want ~%v", i+1, delta, want)
+		}
+		if !state.Unavailable {
+			t.Fatalf("failure #%d: expected state.Unavailable=true", i+1)
+		}
+	}
+
+	// A successful request resets the transient backoff counter.
+	m.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "claude", Model: model, Success: true})
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present after success")
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		if state.RetryBackoffLevel != 0 {
+			t.Fatalf("after success: RetryBackoffLevel = %d, want 0", state.RetryBackoffLevel)
+		}
+		if !state.NextRetryAfter.IsZero() {
+			t.Fatalf("after success: NextRetryAfter = %v, want zero", state.NextRetryAfter)
+		}
+	}
+
+	// The next failure therefore starts the backoff over at one minute.
+	before, state := markFailure()
+	delta := state.NextRetryAfter.Sub(before)
+	if delta < 1*time.Minute-time.Second || delta > 1*time.Minute+5*time.Second {
+		t.Fatalf("after reset: first failure delta = %v, want ~1m", delta)
+	}
+	if state.RetryBackoffLevel != 1 {
+		t.Fatalf("after reset: first failure RetryBackoffLevel = %d, want 1", state.RetryBackoffLevel)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

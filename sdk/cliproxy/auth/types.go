@@ -146,6 +146,10 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// RetryBackoffLevel tracks the progressive cooldown exponent for transient
+	// (timeout / 5xx / connection) failures, mirroring Quota.BackoffLevel which is
+	// reserved for 429 quota errors.
+	RetryBackoffLevel int `json:"retry_backoff_level,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }

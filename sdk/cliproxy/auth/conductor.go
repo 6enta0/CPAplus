@@ -75,6 +75,11 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	// transientBackoffBase/Max bound the progressive cooldown for transient
+	// (timeout / 5xx / connection) failures. Base preserves the historical
+	// first-failure cooldown of one minute; Max aligns with quotaBackoffMax.
+	transientBackoffBase = 1 * time.Minute
+	transientBackoffMax  = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2292,19 +2297,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = false
 							}
 						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
+							applyTransientModelCooldown(state, now, disableCooling)
 						default:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
+							applyTransientModelCooldown(state, now, disableCooling)
 						}
 					}
 
@@ -2367,6 +2362,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.RetryBackoffLevel = 0
 	state.UpdatedAt = now
 }
 
@@ -2381,6 +2377,9 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	if state.RetryBackoffLevel != 0 {
 		return false
 	}
 	return true
@@ -2936,22 +2935,49 @@ func applyCodexQuotaCheckResult(auth *Auth, result internalcodex.QuotaCheckResul
 	auth.Metadata[quotaAutoReenableAtKey] = now.Add(refreshFailureBackoff).Format(time.RFC3339)
 }
 
-// nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
-func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
+// nextBackoffCooldown returns the next cooldown duration and updated backoff
+// level for an exponentially backed-off failure category. The cooldown doubles
+// from base on each level until it saturates at max, after which the level is
+// frozen so it never grows unbounded.
+func nextBackoffCooldown(prevLevel int, base, limit time.Duration, disableCooling bool) (time.Duration, int) {
 	if prevLevel < 0 {
 		prevLevel = 0
 	}
 	if disableCooling {
 		return 0, prevLevel
 	}
-	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
-	if cooldown < quotaBackoffBase {
-		cooldown = quotaBackoffBase
+	cooldown := base * time.Duration(1<<prevLevel)
+	if cooldown < base {
+		// Overflow guard for very large levels.
+		cooldown = base
 	}
-	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
+	if cooldown >= limit {
+		return limit, prevLevel
 	}
 	return cooldown, prevLevel + 1
+}
+
+// nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
+func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
+	return nextBackoffCooldown(prevLevel, quotaBackoffBase, quotaBackoffMax, disableCooling)
+}
+
+// applyTransientModelCooldown applies an exponentially backed-off cooldown to a
+// model state for transient failures (timeout / 5xx / connection errors). The
+// backoff level is tracked separately from quota (state.RetryBackoffLevel) so
+// transient failures do not inherit quota semantics. When cooling is disabled
+// the model stays immediately retryable.
+func applyTransientModelCooldown(state *ModelState, now time.Time, disableCooling bool) {
+	if state == nil {
+		return
+	}
+	cooldown, nextLevel := nextBackoffCooldown(state.RetryBackoffLevel, transientBackoffBase, transientBackoffMax, disableCooling)
+	if cooldown > 0 {
+		state.NextRetryAfter = now.Add(cooldown)
+	} else {
+		state.NextRetryAfter = time.Time{}
+	}
+	state.RetryBackoffLevel = nextLevel
 }
 
 // List returns all auth entries currently known by the manager.
