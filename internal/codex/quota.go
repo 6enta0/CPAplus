@@ -1,7 +1,10 @@
 package codex
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +21,8 @@ import (
 )
 
 const usageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+const resetCreditURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 
 const httpTimeout = 60 * time.Second
 
@@ -41,6 +46,8 @@ type QuotaCheckResult struct {
 	AutoDisableApplied bool          `json:"autoDisableApplied,omitempty"`
 	AutoEnableApplied  bool          `json:"autoEnableApplied,omitempty"`
 	TokenRefreshed     bool          `json:"tokenRefreshed,omitempty"`
+
+	ResetCreditsAvailable *int `json:"resetCreditsAvailable,omitempty"`
 }
 
 func fieldStr(m map[string]any, key string) string {
@@ -337,6 +344,7 @@ func CheckQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config
 	result.Windows = windows
 	result.QuotaCheckedAt = time.Now().Format(time.RFC3339)
 	result.TokenRefreshed = tokenRefreshed
+	result.ResetCreditsAvailable = parseResetCreditsAvailable(usagePayload)
 
 	autoDisable := DetermineAutoDisable(planType, windows)
 	if autoDisable != nil {
@@ -353,7 +361,7 @@ func CheckQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config
 		}
 	}
 
-	persistQuotaFields(filePath, account, planType, windows, result.Error)
+	persistQuotaFields(filePath, account, planType, windows, result.ResetCreditsAvailable, result.Error)
 
 	return result
 }
@@ -379,11 +387,12 @@ func persistRefreshedAccount(path string, original, refreshed map[string]any) {
 	}
 }
 
-func persistQuotaFields(path string, account map[string]any, planType string, windows []QuotaWindow, quotaError string) {
+func persistQuotaFields(path string, account map[string]any, planType string, windows []QuotaWindow, resetCredits *int, quotaError string) {
 	account["quota_plan_type"] = planType
 	account["quota_windows"] = windows
 	account["quota_checked_at"] = time.Now().Format(time.RFC3339)
 	account["quota_error"] = quotaError
+	account["quota_reset_credits"] = resetCredits
 	windowsJSON, _ := json.Marshal(windows)
 	log.Infof("persistQuotaFields for %s: windows_json=%s", filepath.Base(path), string(windowsJSON))
 	if err := writeAuthFile(path, account); err != nil {
@@ -587,4 +596,208 @@ func computeUsedPercent(w map[string]any) *float64 {
 	}
 	pct := (used / limit) * 100
 	return &pct
+}
+
+// parseResetCreditsAvailable extracts rate_limit_reset_credits.available_count
+// from a /wham/usage payload. Returns nil when the field is absent.
+func parseResetCreditsAvailable(payload map[string]any) *int {
+	if payload == nil {
+		return nil
+	}
+	credits := firstDict(payload, "rate_limit_reset_credits", "rateLimitResetCredits")
+	if credits == nil {
+		return nil
+	}
+	if _, ok := credits["available_count"]; ok {
+		v := int(fieldFloat64(credits, "available_count"))
+		return &v
+	}
+	if _, ok := credits["availableCount"]; ok {
+		v := int(fieldFloat64(credits, "availableCount"))
+		return &v
+	}
+	return nil
+}
+
+// ResetCreditResult is the outcome of consuming one rate-limit reset credit.
+// On success it also carries the refreshed quota snapshot (re-fetched from
+// /wham/usage after the reset) so the UI can update the related columns.
+type ResetCreditResult struct {
+	Name                  string        `json:"name"`
+	Status                string        `json:"status"`
+	Error                 string        `json:"error,omitempty"`
+	Code                  string        `json:"code,omitempty"`
+	WindowsReset          int           `json:"windowsReset"`
+	PlanType              string        `json:"planType,omitempty"`
+	Windows               []QuotaWindow `json:"windows,omitempty"`
+	QuotaCheckedAt        string        `json:"quotaCheckedAt,omitempty"`
+	ResetCreditsAvailable *int          `json:"resetCreditsAvailable,omitempty"`
+	TokenRefreshed        bool          `json:"tokenRefreshed,omitempty"`
+	AutoDisableApplied    bool          `json:"autoDisableApplied,omitempty"`
+	AutoEnableApplied     bool          `json:"autoEnableApplied,omitempty"`
+}
+
+// generateRedeemRequestID produces a UUID-v4-shaped idempotency key for the
+// consume call, without pulling in a new dependency.
+func generateRedeemRequestID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	hexStr := hex.EncodeToString(b)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexStr[0:8], hexStr[8:12], hexStr[12:16], hexStr[16:20], hexStr[20:]), nil
+}
+
+// ConsumeRateLimitReset consumes one rate_limit_reset_credit via the ChatGPT
+// backend. Mirrors FetchQuotaUsage's request shape (headers + proxy handling).
+func ConsumeRateLimitReset(accessToken, accountID, proxyURL string, cfg *config.Config) (map[string]any, error) {
+	if accessToken == "" {
+		return nil, fmt.Errorf("missing access_token")
+	}
+	if accountID == "" {
+		return nil, fmt.Errorf("missing account_id")
+	}
+
+	redeemID, err := generateRedeemRequestID()
+	if err != nil {
+		return nil, fmt.Errorf("generate redeem id: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]string{"redeem_request_id": redeemID})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", resetCreditURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal")
+	req.Header.Set("Chatgpt-Account-Id", accountID)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Connection", "close")
+
+	client := &http.Client{Timeout: httpTimeout}
+	if proxyURL != "" || cfg != nil {
+		sdkCfg := config.SDKConfig{ProxyURL: proxyURL}
+		if cfg != nil && proxyURL == "" {
+			sdkCfg = cfg.SDKConfig
+		}
+		client = util.SetProxy(&sdkCfg, client)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reset request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode == 401 {
+		return nil, fmt.Errorf("unauthorized: access token may be expired")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("reset api returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload map[string]any
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("parse reset response: %w", err)
+		}
+	}
+	return payload, nil
+}
+
+// ResetRateLimitCreditForFile consumes one rate-limit reset credit for the
+// given auth file, refreshing an expired token first, then re-fetches usage so
+// the returned result reflects the post-reset windows and remaining credits.
+func ResetRateLimitCreditForFile(authDir, name string, cfg *config.Config, proxyURL string) ResetCreditResult {
+	result := ResetCreditResult{Name: name}
+
+	filePath := filepath.Join(authDir, filepath.Base(name))
+	account, err := loadAuthFile(filePath)
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+		return result
+	}
+
+	if isTokenExpired(account) {
+		rt := firstNonEmpty(fieldStr(account, "refresh_token"))
+		if rt == "" {
+			result.Status = "error"
+			result.Error = "missing refresh_token; cannot refresh expired token"
+			return result
+		}
+		originalAccount := make(map[string]any, len(account))
+		for k, v := range account {
+			originalAccount[k] = v
+		}
+		td, refreshErr := refreshTokens(account, cfg, proxyURL)
+		if refreshErr != nil {
+			result.Status = "error"
+			result.Error = fmt.Sprintf("token refresh failed: %v", refreshErr)
+			return result
+		}
+		account["access_token"] = td.AccessToken
+		account["refresh_token"] = td.RefreshToken
+		account["id_token"] = td.IDToken
+		account["account_id"] = td.AccountID
+		account["email"] = td.Email
+		account["expired"] = td.Expire
+		account["last_refresh"] = time.Now().Format(time.RFC3339)
+		if account["type"] == nil || account["type"] == "" {
+			account["type"] = "codex"
+		}
+		result.TokenRefreshed = true
+		persistRefreshedAccount(filePath, originalAccount, account)
+	}
+
+	accountID := resolveAccountID(account)
+	accessToken := firstNonEmpty(fieldStr(account, "access_token"))
+	if accountID == "" {
+		result.Status = "error"
+		result.Error = "missing account_id"
+		return result
+	}
+	if accessToken == "" {
+		result.Status = "error"
+		result.Error = "missing access_token"
+		return result
+	}
+
+	resetPayload, resetErr := ConsumeRateLimitReset(accessToken, accountID, proxyURL, cfg)
+	if resetErr != nil {
+		result.Status = "error"
+		result.Error = resetErr.Error()
+		return result
+	}
+
+	result.Status = "success"
+	result.Code = fieldStr(resetPayload, "code")
+	result.WindowsReset = int(fieldFloat64(resetPayload, "windows_reset"))
+
+	// Re-fetch usage so the UI reflects post-reset windows and remaining credits.
+	refreshed := CheckQuotaForFile(authDir, name, false, cfg, proxyURL)
+	if refreshed.Status == "success" {
+		result.PlanType = refreshed.PlanType
+		result.Windows = refreshed.Windows
+		result.QuotaCheckedAt = refreshed.QuotaCheckedAt
+		result.ResetCreditsAvailable = refreshed.ResetCreditsAvailable
+		result.AutoDisableApplied = refreshed.AutoDisableApplied
+		result.AutoEnableApplied = refreshed.AutoEnableApplied
+		if refreshed.TokenRefreshed {
+			result.TokenRefreshed = true
+		}
+	}
+
+	return result
 }

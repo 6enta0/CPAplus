@@ -1,6 +1,7 @@
 package management
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,10 @@ import (
 type quotaCheckRequest struct {
 	Names      []string `json:"names"`
 	RefreshNow bool     `json:"refresh_now"`
+}
+
+type quotaResetRequest struct {
+	Name string `json:"name"`
 }
 
 type refreshTokenRequest struct {
@@ -61,6 +66,27 @@ func (h *Handler) PostQuotaCheck(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"results": response})
+}
+
+// PostQuotaReset consumes one rate-limit reset credit for a single auth file
+// and returns the refreshed quota snapshot.
+func (h *Handler) PostQuotaReset(c *gin.Context) {
+	var req quotaResetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		c.JSON(400, gin.H{"error": "name is required"})
+		return
+	}
+
+	result := codexquota.ResetRateLimitCreditForFile(h.cfg.AuthDir, req.Name, h.cfg, h.cfg.ProxyURL)
+	if result.AutoDisableApplied || result.AutoEnableApplied {
+		h.notifyAuthFileStatusChange(result.Name, result.AutoDisableApplied)
+	}
+
+	c.JSON(200, gin.H{"result": result})
 }
 
 func (h *Handler) PostRefreshToken(c *gin.Context) {

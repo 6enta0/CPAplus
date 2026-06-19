@@ -492,7 +492,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		if data, err := os.ReadFile(path); err == nil {
 			var m map[string]any
 			if json.Unmarshal(data, &m) == nil {
-				for _, k := range []string{"quota_checked_at", "quota_plan_type", "quota_error"} {
+				for _, k := range []string{"quota_checked_at", "quota_plan_type", "quota_error", "quota_reset_credits"} {
 					if v, ok := m[k]; ok {
 						entry[k] = v
 					}
