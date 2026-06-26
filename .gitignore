@@ -27,6 +27,7 @@ objectstore/*
 
 # Static assets
 static/*
+scripts/*
 
 # Authentication data
 auths/*
