@@ -462,6 +462,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
+		ID            *string                             `json:"id"`
 		Name          *string                             `json:"name"`
 		Prefix        *string                             `json:"prefix"`
 		Disabled      *bool                               `json:"disabled"`
@@ -502,6 +503,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 
 	entry := h.cfg.OpenAICompatibility[targetIndex]
+	if body.Value.ID != nil {
+		entry.ID = strings.TrimSpace(*body.Value.ID)
+	}
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
@@ -1090,16 +1094,22 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 		return
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
+	entry.ID = strings.TrimSpace(entry.ID)
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
+		entry.APIKeyEntries[i].ID = strings.TrimSpace(entry.APIKeyEntries[i].ID)
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
 		entry.APIKeyEntries[i].APIKey = trimmed
+		entry.APIKeyEntries[i].ProxyURL = strings.TrimSpace(entry.APIKeyEntries[i].ProxyURL)
 		if trimmed != "" {
 			existing[trimmed] = struct{}{}
 		}
 	}
+	config.EnsureOpenAICompatibilityIDs(entry)
 }
 
 func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {

@@ -18,6 +18,19 @@ func TestOpenAICompatibilityProviderKey_EmptyNameFallsBack(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibilityIdentityProviderKeyIgnoresPrefix(t *testing.T) {
+	entry := OpenAICompatibility{
+		Name:    " Sakura-Old ",
+		Prefix:  "deepseek",
+		BaseURL: " https://example.com/v1 ",
+	}
+	got := OpenAICompatibilityIdentityProviderKey(entry)
+	want := "sakura-old|base=https://example.com/v1"
+	if got != want {
+		t.Fatalf("OpenAICompatibilityIdentityProviderKey() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveOpenAICompatibilityEntry_PrefersCompositeProviderKey(t *testing.T) {
 	entries := []OpenAICompatibility{
 		{

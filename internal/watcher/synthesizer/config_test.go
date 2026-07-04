@@ -424,6 +424,58 @@ func TestConfigSynthesizer_OpenAICompat_ProviderKeyUsesNamePrefixBaseURL(t *test
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_DisabledKeyKeepsIdentity(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	entry := config.OpenAICompatibility{
+		ID:      "op-stable",
+		Name:    "Shared",
+		Prefix:  "deepseek",
+		BaseURL: "https://one.example/v1",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+			ID:       "key-stable",
+			APIKey:   "key-a",
+			Disabled: true,
+		}},
+	}
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{entry},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	auth := auths[0]
+	if !auth.Disabled {
+		t.Fatal("disabled API key should synthesize a disabled auth")
+	}
+	if auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("auth status = %q, want %q", auth.Status, coreauth.StatusDisabled)
+	}
+	if got := auth.Attributes["provider_id"]; got != "op-stable" {
+		t.Fatalf("provider_id = %q, want op-stable", got)
+	}
+	if got := auth.Attributes["key_id"]; got != "key-stable" {
+		t.Fatalf("key_id = %q, want key-stable", got)
+	}
+
+	wantIdentityProviderKey := config.OpenAICompatibilityIdentityProviderKey(entry)
+	if got := auth.Attributes["identity_provider_key"]; got != wantIdentityProviderKey {
+		t.Fatalf("identity_provider_key = %q, want %q", got, wantIdentityProviderKey)
+	}
+	if got := auth.Attributes["prefix"]; got != "deepseek" {
+		t.Fatalf("prefix = %q, want deepseek", got)
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

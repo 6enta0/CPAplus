@@ -270,6 +270,8 @@ func (a *Auth) indexSeed() string {
 	apiKey := ""
 	source := ""
 	prefix := ""
+	identityProviderKey := ""
+	identitySource := ""
 	if a.Attributes != nil {
 		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
 			providerKey = strings.ToLower(value)
@@ -279,6 +281,18 @@ func (a *Auth) indexSeed() string {
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
 		source = strings.TrimSpace(a.Attributes["source"])
 		prefix = strings.TrimSpace(a.Attributes["prefix"])
+		identityProviderKey = strings.ToLower(strings.TrimSpace(a.Attributes["identity_provider_key"]))
+		identitySource = strings.TrimSpace(a.Attributes["identity_source"])
+	}
+
+	isOpenAICompat := compatName != "" || identityProviderKey != "" || strings.HasPrefix(providerKey, "openai-compatibility")
+	if isOpenAICompat {
+		if identityProviderKey != "" {
+			providerKey = identityProviderKey
+		}
+		if identitySource != "" {
+			source = identitySource
+		}
 	}
 
 	proxyURL := strings.TrimSpace(a.ProxyURL)
@@ -300,7 +314,7 @@ func (a *Auth) indexSeed() string {
 		if source != "" {
 			parts = append(parts, "source="+source)
 		}
-		if prefix != "" {
+		if prefix != "" && !isOpenAICompat {
 			parts = append(parts, "prefix="+prefix)
 		}
 		return "config:" + strings.Join(parts, "\x00")

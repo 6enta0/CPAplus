@@ -204,12 +204,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerKey := config.OpenAICompatibilityProviderKey(compat.Name, prefix, compat.BaseURL)
+		identityProviderKey := config.OpenAICompatibilityIdentityProviderKey(*compat)
 		base := strings.TrimSpace(compat.BaseURL)
+		providerDisabled := compat.Disabled
 
 		// Handle new APIKeyEntries format (preferred)
 		createdEntries := 0
@@ -219,14 +218,22 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerKey)
 			id, token := idGen.Next(idKind, key, proxyURL)
+			identityKind := fmt.Sprintf("openai-compatibility:%s", identityProviderKey)
+			identityToken := StableToken(identityKind, key, proxyURL)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerKey, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerKey,
+				"source":                fmt.Sprintf("config:%s[%s]", providerKey, token),
+				"identity_source":       fmt.Sprintf("config:%s[%s]", identityProviderKey, identityToken),
+				"base_url":              base,
+				"compat_name":           compat.Name,
+				"provider_id":           compat.ID,
+				"provider_key":          providerKey,
+				"identity_provider_key": identityProviderKey,
 			}
 			if prefix != "" {
 				attrs["prefix"] = prefix
+			}
+			if entry.ID != "" {
+				attrs["key_id"] = entry.ID
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
@@ -238,12 +245,18 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			status := coreauth.StatusActive
+			disabled := providerDisabled || entry.Disabled
+			if disabled {
+				status = coreauth.StatusDisabled
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
+				Status:     status,
+				Disabled:   disabled,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
 				CreatedAt:  now,
@@ -256,11 +269,16 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		if createdEntries == 0 {
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerKey)
 			id, token := idGen.Next(idKind)
+			identityKind := fmt.Sprintf("openai-compatibility:%s", identityProviderKey)
+			identityToken := StableToken(identityKind)
 			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:%s[%s]", providerKey, token),
-				"base_url":     base,
-				"compat_name":  compat.Name,
-				"provider_key": providerKey,
+				"source":                fmt.Sprintf("config:%s[%s]", providerKey, token),
+				"identity_source":       fmt.Sprintf("config:%s[%s]", identityProviderKey, identityToken),
+				"base_url":              base,
+				"compat_name":           compat.Name,
+				"provider_id":           compat.ID,
+				"provider_key":          providerKey,
+				"identity_provider_key": identityProviderKey,
 			}
 			if prefix != "" {
 				attrs["prefix"] = prefix
@@ -272,12 +290,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			status := coreauth.StatusActive
+			if providerDisabled {
+				status = coreauth.StatusDisabled
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerKey,
 				Label:      compat.Name,
 				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
+				Status:     status,
+				Disabled:   providerDisabled,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,

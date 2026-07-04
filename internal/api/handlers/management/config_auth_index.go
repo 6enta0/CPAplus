@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type geminiKeyWithAuthIndex struct {
@@ -34,6 +35,7 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
+	ID            string                                   `json:"id,omitempty"`
 	Name          string                                   `json:"name"`
 	Priority      int                                      `json:"priority,omitempty"`
 	Disabled      bool                                     `json:"disabled"`
@@ -208,9 +210,11 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 	for i := range normalized {
 		entry := normalized[i]
 		providerKey := config.OpenAICompatibilityProviderKeyForEntry(entry)
+		identityProviderKey := config.OpenAICompatibilityIdentityProviderKey(entry)
 		idKind := fmt.Sprintf("openai-compatibility:%s", providerKey)
 
 		response := openAICompatibilityWithAuthIndex{
+			ID:        entry.ID,
 			Name:      entry.Name,
 			Priority:  entry.Priority,
 			Disabled:  entry.Disabled,
@@ -228,9 +232,28 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			for j := range entry.APIKeyEntries {
 				apiKeyEntry := entry.APIKeyEntries[j]
 				id, _ := idGen.Next(idKind, apiKeyEntry.APIKey, apiKeyEntry.ProxyURL)
+				authIndex := liveIndexByID[id]
+				if authIndex == "" {
+					identityKind := fmt.Sprintf("openai-compatibility:%s", identityProviderKey)
+					identityToken := synthesizer.StableToken(identityKind, apiKeyEntry.APIKey, apiKeyEntry.ProxyURL)
+					virtual := &coreauth.Auth{
+						Provider: providerKey,
+						ProxyURL: apiKeyEntry.ProxyURL,
+						Attributes: map[string]string{
+							"identity_provider_key": identityProviderKey,
+							"identity_source":       fmt.Sprintf("config:%s[%s]", identityProviderKey, identityToken),
+							"provider_key":          providerKey,
+							"compat_name":           entry.Name,
+							"base_url":              entry.BaseURL,
+							"api_key":               apiKeyEntry.APIKey,
+							"prefix":                entry.Prefix,
+						},
+					}
+					authIndex = virtual.EnsureIndex()
+				}
 				response.APIKeyEntries[j] = openAICompatibilityAPIKeyWithAuthIndex{
 					OpenAICompatibilityAPIKey: apiKeyEntry,
-					AuthIndex:                 liveIndexByID[id],
+					AuthIndex:                 authIndex,
 				}
 			}
 		}

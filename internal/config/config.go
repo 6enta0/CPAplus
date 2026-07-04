@@ -6,6 +6,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -537,6 +539,9 @@ func (m GeminiModel) GetAlias() string { return m.Alias }
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
+	// ID is a stable management identifier for this provider row.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 
@@ -565,11 +570,17 @@ type OpenAICompatibility struct {
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
+	// ID is a stable management identifier for this API key entry.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Disabled prevents this API key from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
@@ -620,6 +631,47 @@ func OpenAICompatibilityProviderKey(name, prefix, baseURL string) string {
 // a full OpenAI-compatible config entry.
 func OpenAICompatibilityProviderKeyForEntry(entry OpenAICompatibility) string {
 	return OpenAICompatibilityProviderKey(entry.Name, entry.Prefix, entry.BaseURL)
+}
+
+// OpenAICompatibilityIdentityProviderKey returns the credential identity key for
+// an OpenAI-compatible provider. Prefix is intentionally excluded because it is
+// a mutable routing namespace, not a credential identity component.
+func OpenAICompatibilityIdentityProviderKey(entry OpenAICompatibility) string {
+	return OpenAICompatibilityProviderKey(entry.Name, "", entry.BaseURL)
+}
+
+func stableOpenAICompatibilityID(kind string, parts ...string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(kind))
+	for _, part := range parts {
+		hasher.Write([]byte{0})
+		hasher.Write([]byte(strings.TrimSpace(part)))
+	}
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	if len(sum) < 12 {
+		return fmt.Sprintf("%s_%012s", kind, sum)
+	}
+	return fmt.Sprintf("%s_%s", kind, sum[:12])
+}
+
+// EnsureOpenAICompatibilityIDs fills missing management IDs while preserving
+// existing IDs. IDs do not participate in routing; they are for stable
+// management operations.
+func EnsureOpenAICompatibilityIDs(entry *OpenAICompatibility) {
+	if entry == nil {
+		return
+	}
+	entry.ID = strings.TrimSpace(entry.ID)
+	if entry.ID == "" {
+		entry.ID = stableOpenAICompatibilityID("op", entry.Name, entry.BaseURL)
+	}
+	for i := range entry.APIKeyEntries {
+		key := &entry.APIKeyEntries[i]
+		key.ID = strings.TrimSpace(key.ID)
+		if key.ID == "" {
+			key.ID = stableOpenAICompatibilityID("key", entry.ID, key.APIKey, key.ProxyURL)
+		}
+	}
 }
 
 // OpenAICompatibilityEntryMatches reports whether the given routing/config
@@ -974,10 +1026,17 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	out := make([]OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
 	for i := range cfg.OpenAICompatibility {
 		e := cfg.OpenAICompatibility[i]
+		e.ID = strings.TrimSpace(e.ID)
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		for j := range e.APIKeyEntries {
+			e.APIKeyEntries[j].ID = strings.TrimSpace(e.APIKeyEntries[j].ID)
+			e.APIKeyEntries[j].APIKey = strings.TrimSpace(e.APIKeyEntries[j].APIKey)
+			e.APIKeyEntries[j].ProxyURL = strings.TrimSpace(e.APIKeyEntries[j].ProxyURL)
+		}
+		EnsureOpenAICompatibilityIDs(&e)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue

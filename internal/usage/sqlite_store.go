@@ -87,23 +87,79 @@ func stableUsageToken(kind string, parts ...string) string {
 	return digest[:12]
 }
 
-func buildOpenAICompatAuthIndex(providerName, compatName, baseURL, apiKey, proxyURL, prefix string, includePrefix bool) string {
-	providerName = strings.ToLower(strings.TrimSpace(providerName))
+type stableCounterTokenGenerator struct {
+	counters map[string]int
+}
+
+func (g *stableCounterTokenGenerator) next(kind string, parts ...string) string {
+	if g == nil {
+		return stableUsageToken(kind, parts...)
+	}
+	if g.counters == nil {
+		g.counters = make(map[string]int)
+	}
+	short := stableUsageToken(kind, parts...)
+	key := kind + ":" + short
+	index := g.counters[key]
+	g.counters[key] = index + 1
+	if index > 0 {
+		return fmt.Sprintf("%s-%d", short, index)
+	}
+	return short
+}
+
+func openAICompatIdentityProviderKey(name, baseURL string) string {
+	providerName := strings.ToLower(strings.TrimSpace(name))
+	if providerName == "" {
+		providerName = "openai-compatibility"
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return providerName
+	}
+	return providerName + "|base=" + baseURL
+}
+
+func openAICompatProviderKey(name, prefix, baseURL string) string {
+	providerName := strings.ToLower(strings.TrimSpace(name))
+	if providerName == "" {
+		providerName = "openai-compatibility"
+	}
+	prefix = strings.TrimSpace(prefix)
+	baseURL = strings.TrimSpace(baseURL)
+	parts := []string{providerName}
+	if prefix != "" {
+		parts = append(parts, "prefix="+prefix)
+	}
+	if baseURL != "" {
+		parts = append(parts, "base="+baseURL)
+	}
+	return strings.Join(parts, "|")
+}
+
+func buildOpenAICompatAuthIndex(providerKey, compatName, baseURL, apiKey, proxyURL, source, prefix string, includePrefix bool) string {
+	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	compatName = strings.ToLower(strings.TrimSpace(compatName))
 	baseURL = strings.TrimSpace(baseURL)
 	apiKey = strings.TrimSpace(apiKey)
 	proxyURL = strings.TrimSpace(proxyURL)
+	source = strings.TrimSpace(source)
 	prefix = strings.TrimSpace(prefix)
-	if providerName == "" || baseURL == "" || apiKey == "" {
+	if providerKey == "" || baseURL == "" || apiKey == "" {
 		return ""
 	}
-	idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-	token := stableUsageToken(idKind, apiKey, baseURL, proxyURL)
-	parts := []string{"provider=" + providerName}
+	parts := []string{"provider=" + providerKey}
 	if compatName != "" {
 		parts = append(parts, "compat="+compatName)
 	}
-	parts = append(parts, "base="+baseURL, "api_key="+apiKey, "source=config:"+providerName+"["+token+"]")
+	parts = append(parts, "base="+baseURL)
+	if proxyURL != "" {
+		parts = append(parts, "proxy="+proxyURL)
+	}
+	parts = append(parts, "api_key="+apiKey)
+	if source != "" {
+		parts = append(parts, "source="+source)
+	}
 	if includePrefix && prefix != "" {
 		parts = append(parts, "prefix="+prefix)
 	}
@@ -415,21 +471,27 @@ func (s *SQLiteStore) MigrateLegacyOpenAICompatAuthIndexes(cfg *config.Config) {
 		to   string
 	}
 	var remaps []remap
+	oldTokenGen := &stableCounterTokenGenerator{}
 	for i := range cfg.OpenAICompatibility {
 		compat := cfg.OpenAICompatibility[i]
-		if compat.Disabled || strings.TrimSpace(compat.Prefix) == "" {
+		if strings.TrimSpace(compat.Prefix) == "" {
 			continue
 		}
-		providerName := compat.Name
-		if strings.TrimSpace(providerName) == "" {
-			providerName = "openai-compatibility"
-		}
+		oldProviderKey := openAICompatProviderKey(compat.Name, compat.Prefix, compat.BaseURL)
+		newProviderKey := openAICompatIdentityProviderKey(compat.Name, compat.BaseURL)
 		for j := range compat.APIKeyEntries {
 			entry := compat.APIKeyEntries[j]
-			legacy := buildOpenAICompatAuthIndex(providerName, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, compat.Prefix, false)
-			current := buildOpenAICompatAuthIndex(providerName, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, compat.Prefix, true)
-			if legacy != "" && current != "" && legacy != current {
-				remaps = append(remaps, remap{from: legacy, to: current})
+			oldKind := fmt.Sprintf("openai-compatibility:%s", oldProviderKey)
+			oldToken := oldTokenGen.next(oldKind, entry.APIKey, entry.ProxyURL)
+			oldSource := fmt.Sprintf("config:%s[%s]", oldProviderKey, oldToken)
+			newKind := fmt.Sprintf("openai-compatibility:%s", newProviderKey)
+			newToken := stableUsageToken(newKind, entry.APIKey, entry.ProxyURL)
+			newSource := fmt.Sprintf("config:%s[%s]", newProviderKey, newToken)
+
+			oldIndex := buildOpenAICompatAuthIndex(oldProviderKey, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, oldSource, compat.Prefix, true)
+			newIndex := buildOpenAICompatAuthIndex(newProviderKey, compat.Name, compat.BaseURL, entry.APIKey, entry.ProxyURL, newSource, "", false)
+			if oldIndex != "" && newIndex != "" && oldIndex != newIndex {
+				remaps = append(remaps, remap{from: oldIndex, to: newIndex})
 			}
 		}
 	}
@@ -451,9 +513,12 @@ func (s *SQLiteStore) MigrateLegacyOpenAICompatAuthIndexes(cfg *config.Config) {
 		if err == nil && affected > 0 {
 			migrated += int(affected)
 		}
+		if _, errLastUsed := s.db.Exec(`UPDATE OR IGNORE auth_last_used SET auth_index = ? WHERE auth_index = ?`, remap.to, remap.from); errLastUsed != nil {
+			log.WithError(errLastUsed).WithFields(log.Fields{"from": remap.from, "to": remap.to}).Warn("usage db: auth_last_used migration failed")
+		}
 	}
 	if migrated > 0 {
-		log.Infof("usage db: migrated %d usage records to current openai-compatible auth indexes", migrated)
+		log.Infof("usage db: migrated %d usage records to prefix-free openai-compatible auth indexes", migrated)
 	}
 }
 

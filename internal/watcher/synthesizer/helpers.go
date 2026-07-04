@@ -51,6 +51,23 @@ func (g *StableIDGenerator) Next(kind string, parts ...string) (string, string) 
 	return fmt.Sprintf("%s:%s", kind, short), short
 }
 
+// StableToken returns the deterministic short hash token used by generated
+// config sources without applying duplicate counters.
+func StableToken(kind string, parts ...string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(kind))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		hasher.Write([]byte{0})
+		hasher.Write([]byte(trimmed))
+	}
+	digest := hex.EncodeToString(hasher.Sum(nil))
+	if len(digest) < 12 {
+		return fmt.Sprintf("%012s", digest)
+	}
+	return digest[:12]
+}
+
 // ApplyAuthExcludedModelsMeta applies excluded models metadata to an auth entry.
 // It computes a hash of excluded models and sets the auth_kind attribute.
 // For OAuth entries, perKey (from the JSON file's excluded-models field) is merged

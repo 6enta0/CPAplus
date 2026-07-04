@@ -101,26 +101,30 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
-func TestEnsureIndexDifferentPrefixDifferentIndex(t *testing.T) {
+func TestEnsureIndexOpenAICompatIgnoresPrefix(t *testing.T) {
 	t.Parallel()
 
 	sameKeyNoPrefix := &Auth{
 		Provider: "openai-compatibility",
 		Attributes: map[string]string{
-			"api_key":      "sk-same-key",
-			"compat_name":  "my-provider",
-			"provider_key": "my-provider",
-			"source":       "config:my-provider[token1]",
+			"api_key":               "sk-same-key",
+			"base_url":              "https://example.com/v1",
+			"compat_name":           "my-provider",
+			"provider_key":          "my-provider|base=https://example.com/v1",
+			"identity_provider_key": "my-provider|base=https://example.com/v1",
+			"identity_source":       "config:my-provider|base=https://example.com/v1[token]",
 		},
 	}
 	sameKeyWithPrefix := &Auth{
-		Provider: "openai-compatibility",
+		Provider: "my-provider|prefix=alt-prefix|base=https://example.com/v1",
 		Attributes: map[string]string{
-			"api_key":      "sk-same-key",
-			"compat_name":  "my-provider",
-			"provider_key": "my-provider",
-			"prefix":       "alt-prefix",
-			"source":       "config:my-provider[token2]",
+			"api_key":               "sk-same-key",
+			"base_url":              "https://example.com/v1",
+			"compat_name":           "my-provider",
+			"provider_key":          "my-provider|prefix=alt-prefix|base=https://example.com/v1",
+			"identity_provider_key": "my-provider|base=https://example.com/v1",
+			"identity_source":       "config:my-provider|base=https://example.com/v1[token]",
+			"prefix":                "alt-prefix",
 		},
 	}
 
@@ -133,8 +137,42 @@ func TestEnsureIndexDifferentPrefixDifferentIndex(t *testing.T) {
 	if withPrefixIdx == "" {
 		t.Fatal("with-prefix index should not be empty")
 	}
-	if noPrefixIdx == withPrefixIdx {
-		t.Fatalf("same api_key+name with different prefix produced duplicate auth_index %q", noPrefixIdx)
+	if noPrefixIdx != withPrefixIdx {
+		t.Fatalf("same api_key+name+base with different prefix produced different auth_index: %q != %q", noPrefixIdx, withPrefixIdx)
+	}
+}
+
+func TestEnsureIndexNonOpenAICompatKeepsPrefixWithCompositeProviderKey(t *testing.T) {
+	t.Parallel()
+
+	base := &Auth{
+		Provider: "custom|base=https://example.com/v1",
+		Attributes: map[string]string{
+			"api_key":      "shared-key",
+			"base_url":     "https://example.com/v1",
+			"provider_key": "custom|base=https://example.com/v1",
+			"source":       "config:custom|base=https://example.com/v1[token]",
+		},
+	}
+	prefixed := &Auth{
+		Provider: "custom|base=https://example.com/v1",
+		Attributes: map[string]string{
+			"api_key":      "shared-key",
+			"base_url":     "https://example.com/v1",
+			"provider_key": "custom|base=https://example.com/v1",
+			"prefix":       "alt-prefix",
+			"source":       "config:custom|base=https://example.com/v1[token]",
+		},
+	}
+
+	baseIdx := base.EnsureIndex()
+	prefixedIdx := prefixed.EnsureIndex()
+
+	if baseIdx == "" || prefixedIdx == "" {
+		t.Fatalf("indexes should not be empty: base=%q prefixed=%q", baseIdx, prefixedIdx)
+	}
+	if baseIdx == prefixedIdx {
+		t.Fatalf("non-openai-compatible auths should keep prefix in auth_index seed, got duplicate %q", baseIdx)
 	}
 }
 
