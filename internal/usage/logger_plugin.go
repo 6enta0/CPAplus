@@ -116,6 +116,25 @@ type StatisticsSnapshot struct {
 	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
 }
 
+type SnapshotOptions struct {
+	Since time.Time
+	Until time.Time
+}
+
+func (o SnapshotOptions) HasRange() bool {
+	return !o.Since.IsZero() || !o.Until.IsZero()
+}
+
+func (o SnapshotOptions) includes(timestamp time.Time) bool {
+	if !o.Since.IsZero() && timestamp.Before(o.Since) {
+		return false
+	}
+	if !o.Until.IsZero() && timestamp.After(o.Until) {
+		return false
+	}
+	return true
+}
+
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
 	TotalTokens   int64                    `json:"total_tokens"`
@@ -216,6 +235,14 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 }
 
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+	return s.SnapshotWithOptions(SnapshotOptions{})
+}
+
+func (s *RequestStatistics) SnapshotRange(since, until time.Time) StatisticsSnapshot {
+	return s.SnapshotWithOptions(SnapshotOptions{Since: since, Until: until})
+}
+
+func (s *RequestStatistics) SnapshotWithOptions(options SnapshotOptions) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
 	if s == nil {
 		return result
@@ -224,30 +251,105 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result.TotalRequests = s.totalRequests
-	result.SuccessCount = s.successCount
-	result.FailureCount = s.failureCount
-	result.TotalTokens = s.totalTokens
+	if !options.HasRange() {
+		result.TotalRequests = s.totalRequests
+		result.SuccessCount = s.successCount
+		result.FailureCount = s.failureCount
+		result.TotalTokens = s.totalTokens
+	}
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
-			TotalRequests: stats.TotalRequests,
-			TotalTokens:   stats.TotalTokens,
-			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
+			Models: make(map[string]ModelSnapshot, len(stats.Models)),
+		}
+		if !options.HasRange() {
+			apiSnapshot.TotalRequests = stats.TotalRequests
+			apiSnapshot.TotalTokens = stats.TotalTokens
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			requestDetails := make([]RequestDetail, 0, len(modelStatsValue.Details))
+			var modelRequests int64
+			var modelTokens int64
+			for _, detail := range modelStatsValue.Details {
+				if !options.includes(detail.Timestamp) {
+					continue
+				}
+				requestDetails = append(requestDetails, detail)
+				if options.HasRange() {
+					tokens := detail.Tokens.TotalTokens
+					if tokens < 0 {
+						tokens = 0
+					}
+					modelRequests++
+					modelTokens += tokens
+					result.TotalRequests++
+					if detail.Failed {
+						result.FailureCount++
+					} else {
+						result.SuccessCount++
+					}
+					result.TotalTokens += tokens
+					addSnapshotTimeBucket(&result, detail.Timestamp, tokens)
+				}
+			}
+			if options.HasRange() && len(requestDetails) == 0 {
+				continue
+			}
+			if !options.HasRange() {
+				modelRequests = modelStatsValue.TotalRequests
+				modelTokens = modelStatsValue.TotalTokens
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
-				TotalRequests: modelStatsValue.TotalRequests,
-				TotalTokens:   modelStatsValue.TotalTokens,
+				TotalRequests: modelRequests,
+				TotalTokens:   modelTokens,
 				Details:       requestDetails,
 			}
+			if options.HasRange() {
+				apiSnapshot.TotalRequests += modelRequests
+				apiSnapshot.TotalTokens += modelTokens
+			}
+		}
+		if options.HasRange() && len(apiSnapshot.Models) == 0 {
+			continue
 		}
 		result.APIs[apiName] = apiSnapshot
 	}
 
+	if options.HasRange() {
+		return result
+	}
+
+	copySnapshotTimeBuckets(&result, s)
+
+	return result
+}
+
+func addSnapshotTimeBucket(snapshot *StatisticsSnapshot, timestamp time.Time, totalTokens int64) {
+	if snapshot == nil {
+		return
+	}
+	if snapshot.RequestsByDay == nil {
+		snapshot.RequestsByDay = make(map[string]int64)
+	}
+	if snapshot.RequestsByHour == nil {
+		snapshot.RequestsByHour = make(map[string]int64)
+	}
+	if snapshot.TokensByDay == nil {
+		snapshot.TokensByDay = make(map[string]int64)
+	}
+	if snapshot.TokensByHour == nil {
+		snapshot.TokensByHour = make(map[string]int64)
+	}
+	dayKey := timestamp.Format("2006-01-02")
+	hourKey := formatHour(timestamp.Hour())
+	snapshot.RequestsByDay[dayKey]++
+	snapshot.RequestsByHour[hourKey]++
+	snapshot.TokensByDay[dayKey] += totalTokens
+	snapshot.TokensByHour[hourKey] += totalTokens
+}
+
+func copySnapshotTimeBuckets(result *StatisticsSnapshot, s *RequestStatistics) {
 	result.RequestsByDay = make(map[string]int64, len(s.requestsByDay))
 	for k, v := range s.requestsByDay {
 		result.RequestsByDay[k] = v
@@ -269,8 +371,6 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		key := formatHour(hour)
 		result.TokensByHour[key] = v
 	}
-
-	return result
 }
 
 type MergeResult struct {

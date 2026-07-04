@@ -2,7 +2,9 @@ package management
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,11 +30,63 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 		})
 		return
 	}
-	snapshot := h.usageStats.Snapshot()
+	options, errOptions := parseUsageSnapshotOptions(c)
+	if errOptions != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errOptions.Error()})
+		return
+	}
+	snapshot := h.usageStats.SnapshotWithOptions(options)
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+func parseUsageSnapshotOptions(c *gin.Context) (usage.SnapshotOptions, error) {
+	var options usage.SnapshotOptions
+	if c == nil {
+		return options, nil
+	}
+
+	now := time.Now()
+	rangeValue := strings.TrimSpace(c.Query("range"))
+	switch rangeValue {
+	case "", "all":
+	case "7h":
+		options.Since = now.Add(-7 * time.Hour)
+		options.Until = now
+	case "24h":
+		options.Since = now.Add(-24 * time.Hour)
+		options.Until = now
+	case "7d":
+		options.Since = now.Add(-7 * 24 * time.Hour)
+		options.Until = now
+	default:
+		return options, fmt.Errorf("unsupported range %q", rangeValue)
+	}
+
+	if sinceValue := strings.TrimSpace(c.Query("since")); sinceValue != "" {
+		since, errParse := time.Parse(time.RFC3339Nano, sinceValue)
+		if errParse != nil {
+			return options, fmt.Errorf("invalid since timestamp")
+		}
+		options.Since = since
+		if options.Until.IsZero() {
+			options.Until = now
+		}
+	}
+	if untilValue := strings.TrimSpace(c.Query("until")); untilValue != "" {
+		until, errParse := time.Parse(time.RFC3339Nano, untilValue)
+		if errParse != nil {
+			return options, fmt.Errorf("invalid until timestamp")
+		}
+		options.Until = until
+	}
+	if !options.Since.IsZero() && !options.Until.IsZero() && options.Until.Before(options.Since) {
+		return options, fmt.Errorf("until must be greater than or equal to since")
+	}
+
+	return options, nil
 }
 
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
