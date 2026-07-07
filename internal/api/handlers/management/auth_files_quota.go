@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	codexquota "github.com/router-for-me/CLIProxyAPI/v6/internal/codex"
-	log "github.com/sirupsen/logrus"
 )
 
 type quotaCheckRequest struct {
@@ -60,9 +59,6 @@ func (h *Handler) PostQuotaCheck(c *gin.Context) {
 	response := make([]codexquota.QuotaCheckResult, len(req.Names))
 	for i, r := range results {
 		response[i] = r.Result
-		if r.Result.AutoDisableApplied || r.Result.AutoEnableApplied {
-			h.notifyAuthFileStatusChange(r.Result.Name, r.Result.AutoDisableApplied)
-		}
 	}
 
 	c.JSON(200, gin.H{"results": response})
@@ -82,9 +78,6 @@ func (h *Handler) PostQuotaReset(c *gin.Context) {
 	}
 
 	result := codexquota.ResetRateLimitCreditForFile(h.cfg.AuthDir, req.Name, h.cfg, h.cfg.ProxyURL)
-	if result.AutoDisableApplied || result.AutoEnableApplied {
-		h.notifyAuthFileStatusChange(result.Name, result.AutoDisableApplied)
-	}
 
 	c.JSON(200, gin.H{"result": result})
 }
@@ -132,16 +125,4 @@ func (h *Handler) PostRefreshToken(c *gin.Context) {
 	wg.Wait()
 
 	c.JSON(200, gin.H{"results": results})
-}
-
-func (h *Handler) notifyAuthFileStatusChange(name string, disabled bool) {
-	status := "enabled"
-	if disabled {
-		status = "disabled"
-	}
-	log.WithFields(log.Fields{
-		"auth_file": name,
-		"status":    status,
-		"source":    "quota-auto-manage",
-	}).Infof("auth file status changed by quota auto-manage: %s -> %s", name, status)
 }

@@ -255,6 +255,16 @@ func DetermineAutoDisable(planType string, windows []QuotaWindow) *bool {
 }
 
 func CheckQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config, proxyURL string) QuotaCheckResult {
+	return checkQuotaForFile(authDir, name, refreshNow, cfg, proxyURL, false)
+}
+
+// CheckQuotaForFileWithStatusManagement is reserved for runtime usage-limit
+// recovery flows that intentionally toggle the auth disabled state.
+func CheckQuotaForFileWithStatusManagement(authDir, name string, refreshNow bool, cfg *config.Config, proxyURL string) QuotaCheckResult {
+	return checkQuotaForFile(authDir, name, refreshNow, cfg, proxyURL, true)
+}
+
+func checkQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config, proxyURL string, manageStatus bool) QuotaCheckResult {
 	result := QuotaCheckResult{Name: name}
 
 	filePath := filepath.Join(authDir, filepath.Base(name))
@@ -346,8 +356,7 @@ func CheckQuotaForFile(authDir, name string, refreshNow bool, cfg *config.Config
 	result.TokenRefreshed = tokenRefreshed
 	result.ResetCreditsAvailable = parseResetCreditsAvailable(usagePayload)
 
-	autoDisable := DetermineAutoDisable(planType, windows)
-	if autoDisable != nil {
+	if autoDisable := DetermineAutoDisable(planType, windows); manageStatus && autoDisable != nil {
 		previousDisabled := false
 		if d, ok := account["disabled"].(bool); ok {
 			previousDisabled = d
@@ -633,8 +642,6 @@ type ResetCreditResult struct {
 	QuotaCheckedAt        string        `json:"quotaCheckedAt,omitempty"`
 	ResetCreditsAvailable *int          `json:"resetCreditsAvailable,omitempty"`
 	TokenRefreshed        bool          `json:"tokenRefreshed,omitempty"`
-	AutoDisableApplied    bool          `json:"autoDisableApplied,omitempty"`
-	AutoEnableApplied     bool          `json:"autoEnableApplied,omitempty"`
 }
 
 // generateRedeemRequestID produces a UUID-v4-shaped idempotency key for the
@@ -792,8 +799,6 @@ func ResetRateLimitCreditForFile(authDir, name string, cfg *config.Config, proxy
 		result.Windows = refreshed.Windows
 		result.QuotaCheckedAt = refreshed.QuotaCheckedAt
 		result.ResetCreditsAvailable = refreshed.ResetCreditsAvailable
-		result.AutoDisableApplied = refreshed.AutoDisableApplied
-		result.AutoEnableApplied = refreshed.AutoEnableApplied
 		if refreshed.TokenRefreshed {
 			result.TokenRefreshed = true
 		}

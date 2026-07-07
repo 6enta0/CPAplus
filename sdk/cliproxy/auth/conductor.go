@@ -84,7 +84,7 @@ const (
 
 var quotaCooldownDisabled atomic.Bool
 
-var checkCodexQuotaForFile = internalcodex.CheckQuotaForFile
+var checkCodexQuotaForFile = internalcodex.CheckQuotaForFileWithStatusManagement
 
 const (
 	quotaAutoReenableReasonKey = "quota_auto_reenable_reason"
