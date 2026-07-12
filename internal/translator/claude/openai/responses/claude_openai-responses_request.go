@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -196,6 +197,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								textAggregate.WriteString(txt)
 								contentPart := []byte(`{"type":"text","text":""}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, string(contentPart))
 							}
 							if ptype == "input_text" {
@@ -231,6 +233,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
 								}
 								if len(contentPart) > 0 {
+									contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 									partsJSON = append(partsJSON, string(contentPart))
 									if role == "" {
 										role = "user"
@@ -256,6 +259,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
 								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								contentPart = translatorcommon.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, string(contentPart))
 								if role == "" {
 									role = "user"
@@ -283,21 +287,24 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
+					textPart := gjson.Parse(partsJSON[0])
+					hasPartCacheControl := textPart.Get("cache_control").Exists()
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasPartCacheControl && !item.Get("cache_control").Exists() {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
-						textPart := gjson.Parse(partsJSON[0])
 						msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
 					} else {
 						for _, partJSON := range partsJSON {
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
+					msg = translatorcommon.AttachMessageCacheControl(msg, item)
 					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
 					msg := []byte(`{"role":"","content":""}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+					msg = translatorcommon.AttachMessageCacheControl(msg, item)
 					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				}
 
@@ -559,6 +566,10 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
 	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", normalizeClaudeToolInputSchema(responsesToolParameters(tool)))
+	tJSON = translatorcommon.AttachCacheControl(tJSON, tool)
+	if !gjson.GetBytes(tJSON, "cache_control").Exists() {
+		tJSON = translatorcommon.AttachCacheControl(tJSON, tool.Get("function"))
+	}
 	return tJSON, true
 }
 

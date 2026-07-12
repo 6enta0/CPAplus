@@ -54,3 +54,29 @@ func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesInputI
 		t.Fatalf("tool result retained data URL text: %s", out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_PreservesCacheControl(t *testing.T) {
+	raw := []byte(`{
+		"input":[{
+			"type":"message",
+			"role":"user",
+			"content":[
+				{"type":"input_text","text":"cached","cache_control":{"type":"ephemeral"}},
+				{"type":"input_text","text":"fresh"}
+			]
+		}],
+		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	content := gjson.GetBytes(out, "messages.0.content")
+	if !content.IsArray() {
+		t.Fatalf("content with cache marker was collapsed to string: %s", out)
+	}
+	if got := content.Get("0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("content cache_control.type = %q, want ephemeral. Output: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool cache_control.type = %q, want ephemeral. Output: %s", got, out)
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -172,19 +173,30 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 			switch role {
 			case "system":
+				systemStart := len(gjson.GetBytes(out, "system").Array())
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
+					textPart = translatorcommon.AttachCacheControl(textPart, message)
 					out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
 							textPart := []byte(`{"type":"text","text":""}`)
 							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							textPart = translatorcommon.AttachCacheControl(textPart, part)
 							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 						}
 						return true
 					})
+					if message.Get("cache_control").Exists() {
+						systemParts := gjson.GetBytes(out, "system").Array()
+						if len(systemParts) > systemStart && !systemParts[len(systemParts)-1].Get("cache_control").Exists() {
+							path := fmt.Sprintf("system.%d", len(systemParts)-1)
+							block := translatorcommon.AttachCacheControl([]byte(systemParts[len(systemParts)-1].Raw), message)
+							out, _ = sjson.SetRawBytes(out, path, block)
+						}
+					}
 				}
 			case "user", "assistant":
 				msg := []byte(`{"role":"","content":[]}`)
@@ -243,6 +255,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					})
 				}
 
+				msg = translatorcommon.AttachMessageCacheControl(msg, message)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 
@@ -260,6 +273,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
+				msg = translatorcommon.AttachMessageCacheControl(msg, message)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 			}
@@ -292,6 +306,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+				}
+				anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, tool)
+				if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
+					anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, function)
 				}
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
@@ -334,14 +352,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+	var claudePart []byte
 	switch part.Get("type").String() {
 	case "text":
 		textPart := []byte(`{"type":"text","text":""}`)
 		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		return string(textPart)
+		claudePart = textPart
 
 	case "image_url":
-		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
+		claudePart = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -354,12 +373,15 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				return string(docPart)
+				claudePart = docPart
 			}
 		}
 	}
 
-	return ""
+	if len(claudePart) == 0 {
+		return ""
+	}
+	return string(translatorcommon.AttachCacheControl(claudePart, part))
 }
 
 func convertOpenAIImageURLToClaudePart(imageURL string) string {

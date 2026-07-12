@@ -28,6 +28,34 @@ func TestConvertOpenAIRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_PreservesCacheControl(t *testing.T) {
+	raw := []byte(`{
+		"messages":[{
+			"role":"user",
+			"cache_control":{"type":"ephemeral","ttl":"1h"},
+			"content":[
+				{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}},
+				{"type":"text","text":"fresh"}
+			]
+		}],
+		"tools":[{"type":"function","cache_control":{"type":"ephemeral"},"function":{"name":"lookup","parameters":{"type":"object","properties":{}}}}]
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-test", raw, false)
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("part cache_control.type = %q, want ephemeral. Output: %s", got, out)
+	}
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("message marker replaced part marker: %s", out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("message cache_control ttl = %q, want 1h. Output: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool cache_control.type = %q, want ephemeral. Output: %s", got, out)
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
