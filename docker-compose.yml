@@ -1,6 +1,9 @@
 services:
   cpa-plus:
     image: ${CPA_PLUS_IMAGE:-ghcr.io/6enta0/cpaplus:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     pull_policy: always
     container_name: cpa-plus
     command: ["./CLIProxyAPI", "--config", "/cpa-plus/config/config.yaml"]

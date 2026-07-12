@@ -36,19 +36,19 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 - `indexSeed()`を更新し、ハッシュ計算に`prefix`を含め、`auth_index = SHA256(name + prefix + apiKey + ...)`
 - フロントエンド`resolveSourceDisplay`は`auth_index`を優先ルックアップキーとして使用
 - フロントエンドは専用の`/openai-compatibility` APIからデータを取得
-- SQLite使用統計ストアにスキーマバージョン管理を追加
+- SQLite使用統計ストアにスキーマバージョン管理を追加。バージョン不一致時は使用量テーブルを削除して再作成するため、既存の履歴は失われます。互換性のないバージョンへ更新する前に統計をエクスポートするか、`usage.db`をバックアップしてください
 
 ### 3. Codexクォータ管理とクレデンシャル制御
 
 **ペインポイント**：元プロジェクトではCodexアカウントのクォータ使用状況を一元的に確認するのが不便でした。
 
 **変更点**：
-- `internal/codex/quota.go`を追加 — OAuthトークンリフレッシュ、OpenAI usage APIによるクォータ照会、自動無効化/有効化ロジック、クォータデータのauth fileへの永続化
+- `internal/codex/quota.go`を追加 — OAuthトークンリフレッシュ、OpenAI usage APIによるクォータ照会、実行時クォータ回復フローでの状態管理、クォータデータのauth fileへの永続化
 - 管理APIエンドポイントを追加：
-  - `POST /v0/management/auth-files/quota-check` — バッチクォータ確認 + トークンリフレッシュ + 自動無効化/有効化
+  - `POST /v0/management/auth-files/quota-check` — バッチクォータ照会。必要時または明示指定時にトークンを更新し、クォータ項目を永続化しますが、auth fileの有効状態は変更しません
   - `POST /v0/management/auth-files/refresh-token` — バッチトークンリフレッシュ
 - クォータフィールドをauth JSONファイルに書き込み：`quota_plan_type`、`quota_windows`（usedPercent、resetAtIso含む）、`quota_checked_at`、`quota_error`
-- 自動無効化：クォータが100%に達した場合、auth fileを自動的に無効化；クォータリセット後に自動的に再有効化
+- 手動クォータ確認ではauth fileを自動的に無効化または有効化しません。認証情報の状態を管理する可能性があるのは、独立した実行時クォータ回復フローのみです
 - フロントエンド：各auth fileカードにplan typeバッジ、使用量プログレスバー、リセットカウントダウンを表示
 - ページ読み込み時にディスクからクォータフィールドを読み込み（手動確認不要で表示可能）
 
@@ -57,7 +57,7 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 **ペインポイント**：各API呼び出しのコストを追跡する方法がありませんでした。ユーザーは手動でモデル価格を調べ、自ら費用を計算する必要がありました。
 
 **変更点**：
-- `internal/pricing/`パッケージを追加 — 起動時および72時間ごとに[LitellM](https://github.com/BerriAI/litellm)からモデル価格を同期（価格アプローチは[agent-usage](https://github.com/briqt/agent-usage)を参照）
+- `internal/pricing/`パッケージを追加 — SQLite使用量永続化の初期化後、起動時に[LiteLLM](https://github.com/BerriAI/litellm)からモデル価格の同期を試みます。初回同期が成功した場合のみ、その後72時間ごとに同期します（価格アプローチは[agent-usage](https://github.com/briqt/agent-usage)を参照）。初回同期の失敗ではサーバーは停止しませんが、そのプロセスでは価格管理と定期同期は初期化されません
 - カスタム価格（MiMoモデルなど）はAPIで管理され、LiteLLM同期で上書きされない
 - 価格検索のためのファジーモデル名マッチング（プレフィックス除去、部分文字列包含）
 - `usage_records`テーブルに`cost_usd`列を追加 — 挿入時にinput/output/cacheトークン価格から自動計算
@@ -87,7 +87,7 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 
 - `last_called_at`をauth indexごとに`usage_records`に永続化、再起動後も維持
 - `total_cost_usd`をSQL集計クエリでauth indexごとに集計
-- SQLite使用統計ストアのスキーマバージョン追跡により、スキーマ変更時のデータ破損を防止
+- SQLite使用統計ストアのスキーマバージョン追跡。バージョン不一致時はテーブルが再構築され既存履歴が消去されるため、更新前にバックアップまたはエクスポートしてください
 - フロントエンド：使用統計ページレイアウト調整（リクエストイベント詳細をチャート上部に移動）
 - フロントエンド：コントロールパネルレイアウト最適化（表示オプションを1行に配置、レスポンシブ幅）
 
@@ -122,11 +122,13 @@ mkdir config && mv config.example.yaml config/config.yaml
 
 上記の共通設定に従って `config/config.yaml` を編集してください。コンテナは `network_mode: host` を使用します。外向きプロキシが必要な場合のみ `proxy-url` を設定し、ホスト上のローカルプロキシには `http://127.0.0.1:7890` のようなアドレスを使用できます。
 
-次の Docker 用パスとオプションはそのまま維持してください:
+次のコンテナパスはそのまま維持してください。以下の待受および管理設定はローカルアクセス専用の安全な既定値です：
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -137,7 +139,7 @@ logging-to-file: true
 
 `logging-to-file: true` は任意です。有効にすると、`docker-compose.yml` の `WRITABLE_PATH=/cpa-plus` 経由でログがホストの `./logs` ディレクトリへ永続化されます。
 
-`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。
+`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。リモートアクセスが本当に必要な場合のみ `host` と `allow-remote` を変更し、強力なキー、TLSリバースプロキシ、ファイアウォールまたはネットワークアクセス制御で保護してください。
 
 ```bash
 # 3. 必要なディレクトリを作成して起動
@@ -174,7 +176,7 @@ docker image prune -f
 
 ### 方法2：Goで直接実行（Cloneして実行）
 
-Goがインストール済みのユーザー向け。
+Go 1.26以降がインストール済みのユーザー向け。
 
 上記の共通設定に従って `config.yaml` を準備してください。ローカルプロセスが外向きプロキシを必要とする場合のみ `proxy-url` を設定します。
 
@@ -205,15 +207,18 @@ go run ./cmd/server --config config.yaml
 
 サーバーを動かすだけなら、同梱の `static/management.html` で十分です。
 
-管理フロントエンドを変更した場合は、別リポジトリのフロントエンドを再ビルドし、生成物を CPAplus にコピーし直してください。
+管理フロントエンドを変更した場合は、CPAplusと同じ親ディレクトリに別リポジトリのフロントエンドをクローンしてビルドし、生成物をコピーし直してください。
 
 ```bash
-# 別リポジトリで管理フロントエンドをビルド
-cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+# CPAplusリポジトリのルートから開始
+cd ..
+git clone https://github.com/router-for-me/Cli-Proxy-API-Management-Center.git
+cd Cli-Proxy-API-Management-Center
+npm ci
 npm run build
 
-# 生成物を CPAplus にコピー
-cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+# 生成物を同じ親ディレクトリのCPAplusへコピー
+cp dist/index.html ../CPAplus/static/management.html
 ```
 
 `static/management.html` を置き換えた後は、ブラウザをハードリロードしてください。この種のフロントエンドのみの変更では Go サーバーの再起動は不要です。
@@ -224,11 +229,13 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 
 この方法も、方法1と同じ `docker-compose.yml` のマウント構成と共通設定を使用します。コンテナは `network_mode: host` で動作し、外向きプロキシが必要な場合は `http://127.0.0.1:7890` のようなアドレスでホスト上のプロキシを指定できます。
 
-この Docker ベースの方法では、次のコンテナパスとオプションをそのまま維持してください:
+次のコンテナパスはそのまま維持してください。以下の待受および管理設定はローカルアクセス専用の安全な既定値です：
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -237,7 +244,7 @@ usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
 
-`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。
+`remote-management.secret-key` には、`management.html` へログインするときに使うキーを設定してください。リモートアクセスが本当に必要な場合のみ `host` と `allow-remote` を変更し、強力なキー、TLSリバースプロキシ、ファイアウォールまたはネットワークアクセス制御で保護してください。
 
 認証情報ファイルはリポジトリの `auths/` ディレクトリへ置いてください。コンテナ内では `/cpa-plus/auths` にマウントされます。既存の `refresh_token` フィールドは上書きしないでください。
 
@@ -256,6 +263,31 @@ mkdir config && cp config.example.yaml config/config.yaml
 # http://localhost:8317/management.html
 ```
 
+### APIを呼び出す
+
+`config.yaml` の `api-keys` に設定したクライアントキーを1つ使用します：
+
+```bash
+export CPA_API_KEY="replace-with-one-of-your-api-keys"
+
+curl -sS http://127.0.0.1:8317/v1/models \
+  -H "Authorization: Bearer ${CPA_API_KEY}"
+```
+
+`/v1/models` の返却結果からモデルを選択します：
+
+```bash
+curl -sS http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer ${CPA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "replace-with-a-model-from-v1-models",
+    "messages": [
+      {"role": "user", "content": "Hello"}
+    ]
+  }'
+```
+
 ### 設定
 
 完全な設定リファレンスは[config.example.yaml](config.example.yaml)を参照してください。主な設定項目：
@@ -266,14 +298,24 @@ mkdir config && cp config.example.yaml config/config.yaml
 | `gemini-api-key` | Gemini API Key 認証情報とモデル設定 |
 | `claude-api-key` | Claude API Key 認証情報とモデル設定 |
 | `codex-api-key` | Codex API Key 認証情報とモデル設定 |
-| `openai-compatibility` | 上流 provider 設定（name、base-url、prefix、api-key、models） |
+| `openai-compatibility` | `name`、`base-url`、任意の`prefix`/`priority`/`disabled`/`headers`、`api-key-entries`、`models`を含む上流provider設定 |
 | `vertex-api-key` | Vertex AI 認証情報とモデル設定 |
 | `auth-dir` | Gemini、Claude、Codex などの OAuth 認証情報ファイルを置くディレクトリ |
 | `usage-statistics-enabled` | 使用量トラッキングとコスト計算を有効化 |
 | `usage-db-path` | SQLiteデータベースパス、使用データを永続化（デフォルト：`usage.db`） |
 | `disable-image-generation` | 画像生成エンドポイントと非画像リクエストへの image tool 注入を制御。compact リクエストには image tool を自動注入しません |
 | `proxy-url` | 上流 provider 向けのグローバルプロキシ。必要な場合のみ設定 |
-| `remote-management` | 管理ダッシュボードアクセス設定（secret-keyで認証） |
+| `remote-management` | 管理ダッシュボードアクセス設定（`secret-key`で認証） |
+
+テンプレート内の一部の値は意図的な選択であり、設定を省略した場合の実行時既定値とは異なります：
+
+| 設定項目 | `config.example.yaml` | 省略時 |
+|----------|-----------------------|--------|
+| `usage-statistics-enabled` | `true` | `false` |
+| `routing.strategy` | `fill-first` | `round-robin` |
+| `force-model-prefix` | `true` | `false` |
+
+管理エンドポイントとクライアントAPIでは異なるキーを使用します。`/v0/management/*` ルートは、`remote-management.secret-key`、環境変数 `MANAGEMENT_PASSWORD`、または実行時ローカル/TUIパスワードのいずれかが存在する場合のみ登録されます。YAML内の平文 `remote-management.secret-key` は読み込み時にbcryptハッシュへ変換され、サービスは `config.yaml` への書き戻しを試みます。設定ファイルが書き込み可能であればハッシュが永続化され、以後の起動で平文を再処理せずに済みます。空でない `MANAGEMENT_PASSWORD` は、YAMLで `allow-remote: false` を設定していてもリモート管理を許可します。ローカル専用デプロイでは意図せず設定しないでください。
 
 ## コミュニティ
 

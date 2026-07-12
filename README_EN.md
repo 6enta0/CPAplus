@@ -36,19 +36,19 @@ Modified from:
 - Updated `indexSeed()` in `sdk/cliproxy/auth/types.go` to include `prefix` in the hash computation, so `auth_index = SHA256(name + prefix + apiKey + ...)` instead of `SHA256(name + apiKey + ...)`
 - Frontend `resolveSourceDisplay` now resolves source display via `auth_index` as the primary lookup key (instead of raw source/API key), ensuring each provider entry maps to its correct display name
 - Frontend fetches OpenAI compatibility data from the dedicated `/openai-compatibility` API (which includes `auth-index`) instead of `/config` (which does not)
-- SQLite usage store now has schema versioning — when schema version mismatches, tables are automatically rebuilt
+- SQLite usage storage now has schema versioning. A version mismatch drops and recreates the usage tables, so existing history is lost; export statistics or back up `usage.db` before upgrading across incompatible schema versions
 
 ### 3. Codex Quota Management & Credential Control
 
 **Pain point**: The original project made it inconvenient to centrally check Codex account quota usage.
 
 **Changes**:
-- Added `internal/codex/quota.go` — OAuth token refresh (reusing `internal/auth/codex` package), quota querying via OpenAI usage API, auto-disable/enable logic, quota data persistence to auth files
+- Added `internal/codex/quota.go` — OAuth token refresh (reusing `internal/auth/codex`), quota queries through the OpenAI usage API, runtime quota-recovery status management, and quota-data persistence to auth files
 - Added management API endpoints:
-  - `POST /v0/management/auth-files/quota-check` — batch quota check + token refresh + auto-disable/enable
+  - `POST /v0/management/auth-files/quota-check` — batch quota query; refreshes tokens when needed or explicitly requested and persists quota fields, but does not change auth-file enabled state
   - `POST /v0/management/auth-files/refresh-token` — batch token refresh
 - Quota fields written to auth JSON files: `quota_plan_type`, `quota_windows` (with usedPercent, resetAtIso), `quota_checked_at`, `quota_error`
-- Auto-disable: when quota reaches 100%, the auth file is disabled automatically; re-enabled when quota resets
+- Manual quota checks do not disable or enable auth files; only the separate runtime quota-recovery flow may manage credential status
 - Frontend: Quota display per auth file card with plan type badge, usage bars, and reset countdown
 - Auth file list now reads quota fields from disk on page load (no manual check required for display)
 
@@ -57,7 +57,7 @@ Modified from:
 **Pain point**: There was no way to track how much each API call costs. Users had to manually look up model prices and calculate expenses themselves.
 
 **Changes**:
-- Added `internal/pricing/` package — syncs model prices from [LiteLLM](https://github.com/BerriAI/litellm) on startup and every 72 hours (pricing approach referenced from [agent-usage](https://github.com/briqt/agent-usage))
+- Added `internal/pricing/` package — after SQLite usage persistence initializes, startup attempts to sync model prices from [LiteLLM](https://github.com/BerriAI/litellm); if that initial sync succeeds, synchronization continues every 72 hours (pricing approach referenced from [agent-usage](https://github.com/briqt/agent-usage)). An initial failure does not stop the server, but pricing management and periodic synchronization are not initialized for that process
 - Custom prices (e.g., MiMo models) are managed via API and never overwritten by LiteLLM sync
 - Fuzzy model name matching (prefix stripping, substring containment) for price lookup
 - `usage_records` table now includes `cost_usd` column — calculated at insertion time using input/output/cache token prices
@@ -87,7 +87,7 @@ Modified from:
 
 - `last_called_at` persisted per auth index in `usage_records`, survives restarts
 - `total_cost_usd` aggregated per auth index via SQL query
-- Schema version tracking in SQLite usage store prevents data corruption
+- SQLite usage schema version tracking; a mismatch rebuilds the tables and clears existing history, so back up or export before upgrading
 - Frontend: usage statistics page layout reordered (request events above charts)
 - Frontend: control panel layout improvements (display options in one row, responsive widths)
 
@@ -122,11 +122,13 @@ mkdir config && mv config.example.yaml config/config.yaml
 
 Then update `config/config.yaml` using the common configuration above. The container uses `network_mode: host`; configure `proxy-url` only when an outbound proxy is required, using an address such as `http://127.0.0.1:7890` for a proxy running on the host.
 
-Keep these Docker-specific paths and options exactly as shown:
+Keep these container paths exactly as shown; the listener and management settings below are safe defaults for local-only access:
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -137,7 +139,7 @@ logging-to-file: true
 
 `logging-to-file: true` is optional. When enabled, logs are persisted to the host `./logs` directory through `WRITABLE_PATH=/cpa-plus` in `docker-compose.yml`.
 
-Set `remote-management.secret-key` to the key you will use when logging into `management.html`.
+Set `remote-management.secret-key` to the key you will use when logging into `management.html`. Change `host` and `allow-remote` only when remote access is genuinely required, and protect it with a strong key, TLS reverse proxy, and firewall or network access controls.
 
 ```bash
 # 3. Create required directories and start
@@ -174,7 +176,7 @@ docker image prune -f
 
 ### Option 2: Go Run (Clone & Run)
 
-For users who want to run directly with Go.
+For users with Go 1.26 or newer installed.
 
 Prepare `config.yaml` using the common configuration above. Set `proxy-url` only if the local process requires an outbound proxy.
 
@@ -205,15 +207,18 @@ go run ./cmd/server --config config.yaml
 
 If you only want to run the server, the bundled `static/management.html` is enough.
 
-If you modify the management frontend, rebuild it from the separate frontend repository and then copy the generated file back into CPAplus:
+If you modify the management frontend, clone and build the separate frontend repository next to CPAplus, then copy the generated file back:
 
 ```bash
-# Build management frontend in the separate repo
-cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+# Start in the CPAplus repository root
+cd ..
+git clone https://github.com/router-for-me/Cli-Proxy-API-Management-Center.git
+cd Cli-Proxy-API-Management-Center
+npm ci
 npm run build
 
-# Copy the generated frontend back into CPAplus
-cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+# Copy the generated frontend into the sibling CPAplus repository
+cp dist/index.html ../CPAplus/static/management.html
 ```
 
 After replacing `static/management.html`, hard-refresh the browser. A Go server restart is not required for this frontend-only change.
@@ -224,11 +229,13 @@ For developers who want to customize and build their own image.
 
 This option uses the same `docker-compose.yml` runtime layout and common configuration as Option 1. The container uses `network_mode: host`; when an outbound proxy is required, an address such as `http://127.0.0.1:7890` can target a proxy running on the host.
 
-Keep these container paths exactly as shown for this Docker-based option:
+Keep these container paths exactly as shown; the listener and management settings below are safe defaults for local-only access:
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -237,7 +244,7 @@ usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
 
-Set `remote-management.secret-key` to the key you will use when logging into `management.html`.
+Set `remote-management.secret-key` to the key you will use when logging into `management.html`. Change `host` and `allow-remote` only when remote access is genuinely required, and protect it with a strong key, TLS reverse proxy, and firewall or network access controls.
 
 Put credential files in the repo's `auths/` directory before or after startup. They are mounted into the container as `/cpa-plus/auths`. Preserve any existing `refresh_token` fields.
 
@@ -256,6 +263,31 @@ mkdir config && cp config.example.yaml config/config.yaml
 # http://localhost:8317/management.html
 ```
 
+### Call the API
+
+Use one of the client keys configured under `api-keys` in `config.yaml`:
+
+```bash
+export CPA_API_KEY="replace-with-one-of-your-api-keys"
+
+curl -sS http://127.0.0.1:8317/v1/models \
+  -H "Authorization: Bearer ${CPA_API_KEY}"
+```
+
+Choose a model returned by `/v1/models`:
+
+```bash
+curl -sS http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer ${CPA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "replace-with-a-model-from-v1-models",
+    "messages": [
+      {"role": "user", "content": "Hello"}
+    ]
+  }'
+```
+
 ### Configuration
 
 See [config.example.yaml](config.example.yaml) for full configuration reference. Key settings:
@@ -266,14 +298,24 @@ See [config.example.yaml](config.example.yaml) for full configuration reference.
 | `gemini-api-key` | Gemini API key credentials and model configuration |
 | `claude-api-key` | Claude API key credentials and model configuration |
 | `codex-api-key` | Codex API key credentials and model configuration |
-| `openai-compatibility` | Upstream provider configs (name, base-url, prefix, api-key, models) |
+| `openai-compatibility` | Upstream provider entries with `name`, `base-url`, optional `prefix`/`priority`/`disabled`/`headers`, `api-key-entries`, and `models` |
 | `vertex-api-key` | Vertex AI credentials and model configuration |
 | `auth-dir` | OAuth credential directory for Gemini, Claude, Codex, and other auth files |
 | `usage-statistics-enabled` | Enable usage tracking and cost calculation |
 | `usage-db-path` | SQLite database path for usage persistence (default: `usage.db`) |
 | `disable-image-generation` | Controls image endpoints and image-tool injection in non-image requests; compact requests never auto-inject the image tool |
 | `proxy-url` | Global upstream proxy; configure only when required |
-| `remote-management` | Management dashboard access (secret-key for auth) |
+| `remote-management` | Management dashboard access (`secret-key` for authentication) |
+
+Some values in the template are intentional choices and differ from the runtime defaults used when those settings are omitted:
+
+| Setting | `config.example.yaml` | If omitted |
+|---------|-----------------------|------------|
+| `usage-statistics-enabled` | `true` | `false` |
+| `routing.strategy` | `fill-first` | `round-robin` |
+| `force-model-prefix` | `true` | `false` |
+
+Management endpoints and client APIs use different keys. The `/v0/management/*` routes are registered only when `remote-management.secret-key`, the `MANAGEMENT_PASSWORD` environment variable, or a runtime-local/TUI password is present. A plaintext YAML `remote-management.secret-key` is converted to a bcrypt hash and the service attempts to write it back to `config.yaml`; a writable file persists the hash and avoids processing the plaintext again on later starts. A non-empty `MANAGEMENT_PASSWORD` permits remote management even when YAML sets `allow-remote: false`; do not set it unintentionally for local-only deployments.
 
 ## Community
 Enjoy AI in [LINUX.DO](https://linux.do/) community!

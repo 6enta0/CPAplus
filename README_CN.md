@@ -36,19 +36,19 @@
 - 更新 `sdk/cliproxy/auth/types.go` 中的 `indexSeed()`，在哈希计算中加入 `prefix`，使 `auth_index = SHA256(name + prefix + apiKey + ...)` 而非 `SHA256(name + apiKey + ...)`
 - 前端 `resolveSourceDisplay` 现在优先通过 `auth_index` 解析来源显示（而非原始 source/API key），确保每个 provider 条目映射到正确的显示名称
 - 前端从独立的 `/openai-compatibility` API（包含 `auth-index`）获取数据，而非 `/config`（不包含）
-- SQLite 使用统计存储新增 schema 版本管理 — 版本不匹配时自动重建表
+- SQLite 使用统计存储新增 schema 版本管理。版本不匹配时会删除并重建使用量表，现有历史记录将丢失；跨不兼容版本升级前请先导出统计或备份 `usage.db`
 
 ### 3. Codex 额度管理与凭证控制
 
 **痛点**：原项目不方便集中查看 Codex 账户额度使用情况。
 
 **变更**：
-- 新增 `internal/codex/quota.go` — OAuth token 刷新（复用 `internal/auth/codex` 包）、通过 OpenAI usage API 查询额度、自动停用/启用逻辑、额度数据持久化到 auth file
+- 新增 `internal/codex/quota.go` — OAuth token 刷新（复用 `internal/auth/codex` 包）、通过 OpenAI usage API 查询额度、运行时额度恢复状态管理、额度数据持久化到 auth file
 - 新增管理 API 端点：
-  - `POST /v0/management/auth-files/quota-check` — 批量额度查询 + token 刷新 + 自动停用/启用
+  - `POST /v0/management/auth-files/quota-check` — 批量额度查询；按需或显式刷新 token，并持久化额度字段，但不会修改 auth file 的启用状态
   - `POST /v0/management/auth-files/refresh-token` — 批量 token 刷新
 - 额度字段写入 auth JSON 文件：`quota_plan_type`、`quota_windows`（含 usedPercent、resetAtIso）、`quota_checked_at`、`quota_error`
-- 自动停用：额度达 100% 时自动停用 auth file；额度重置后自动重新启用
+- 手动额度查询不会自动停用或启用 auth file；只有独立的运行时额度恢复流程可能管理凭证状态
 - 前端：每个 auth file 卡片显示 plan type 徽章、用量进度条和重置倒计时
 - 页面加载时从磁盘读取额度字段（无需手动查询即可显示）
 
@@ -57,7 +57,7 @@
 **痛点**：无法追踪每次 API 调用的花费。用户需要手动查找模型价格并自行计算费用。
 
 **变更**：
-- 新增 `internal/pricing/` 包 — 启动时及每 72 小时从 [LiteLLM](https://github.com/BerriAI/litellm) 同步模型价格（定价方案参考 [agent-usage](https://github.com/briqt/agent-usage)）
+- 新增 `internal/pricing/` 包 — SQLite 使用量持久化初始化成功后，启动时尝试从 [LiteLLM](https://github.com/BerriAI/litellm) 同步模型价格；首次同步成功后每 72 小时继续同步（定价方案参考 [agent-usage](https://github.com/briqt/agent-usage)）。首次同步失败不会阻止服务启动，但本次进程不会初始化定价管理或启动周期同步
 - 自定义价格（如 MiMo 模型）通过 API 管理，不会被 LiteLLM 同步覆盖
 - 模糊模型名匹配（前缀剥离、子串包含）用于价格查找
 - `usage_records` 表新增 `cost_usd` 列 — 插入时根据 input/output/cache token 价格自动计算
@@ -87,7 +87,7 @@
 
 - `last_called_at` 按 auth index 持久化到 `usage_records`，重启后数据不丢失
 - `total_cost_usd` 通过 SQL 聚合查询按 auth index 统计
-- SQLite 使用统计存储 schema 版本追踪，防止 schema 变更时数据损坏
+- SQLite 使用统计存储 schema 版本追踪；版本不匹配时会重建表并清除现有历史记录，升级前请先备份或导出
 - 前端：使用统计页面布局调整（请求事件明细移至图表上方）
 - 前端：控制面板布局优化（显示选项横向排列、响应式宽度）
 
@@ -122,11 +122,13 @@ mkdir config && mv config.example.yaml config/config.yaml
 
 然后按照上述通用配置说明编辑 `config/config.yaml`。容器使用 `network_mode: host`；只有容器确实需要出站代理时才设置 `proxy-url`，此时可以用 `http://127.0.0.1:7890` 指向宿主机本地代理。
 
-下面这些 Docker 路径和选项请按原样保留：
+下面这些容器路径请按原样保留；以下监听和管理设置是仅本机访问的安全默认值：
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -137,7 +139,7 @@ logging-to-file: true
 
 `logging-to-file: true` 是可选项。启用后，日志会通过 `docker-compose.yml` 中的 `WRITABLE_PATH=/cpa-plus` 持久化到宿主机的 `./logs` 目录。
 
-请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。
+请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。只有确实需要远程访问时才修改 `host` 和 `allow-remote`；同时使用强密钥、TLS 反向代理和防火墙或网络访问控制。
 
 ```bash
 # 3. 创建必要目录并启动
@@ -174,7 +176,7 @@ docker image prune -f
 
 ### 方式二：Go 直接运行（Clone 后运行）
 
-适合已安装 Go 的用户。
+适合已安装 Go 1.26 或更高版本的用户。
 
 按照上述通用配置说明准备 `config.yaml`。只有本地进程确实需要出站代理时才设置 `proxy-url`。
 
@@ -205,15 +207,18 @@ go run ./cmd/server --config config.yaml
 
 如果你只是运行服务，仓库内自带的 `static/management.html` 已经够用。
 
-如果你修改了管理前端，需要到独立的前端仓库重新构建，然后把生成结果拷回 CPAplus：
+如果你修改了管理前端，需要在 CPAplus 的同级目录克隆并构建独立的前端仓库，然后把生成结果拷回：
 
 ```bash
-# 在独立前端仓库中构建管理面板
-cd ~/projects/github_repos/Cli-Proxy-API-Management-Center
+# 当前位于 CPAplus 仓库根目录
+cd ..
+git clone https://github.com/router-for-me/Cli-Proxy-API-Management-Center.git
+cd Cli-Proxy-API-Management-Center
+npm ci
 npm run build
 
-# 将生成结果拷回 CPAplus
-cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
+# 将生成结果拷回同级的 CPAplus 仓库
+cp dist/index.html ../CPAplus/static/management.html
 ```
 
 替换 `static/management.html` 后，浏览器强制刷新即可。此类纯前端改动不需要重启 Go 服务。
@@ -224,11 +229,13 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 
 这种方式运行时仍然使用与方式一相同的 `docker-compose.yml` 挂载布局和通用配置。容器使用 `network_mode: host`；需要出站代理时，可以用 `http://127.0.0.1:7890` 指向宿主机本地代理。
 
-下面这些容器路径和选项请按原样保留：
+下面这些容器路径请按原样保留；以下监听和管理设置是仅本机访问的安全默认值：
 
 ```yaml
+host: "127.0.0.1"
+
 remote-management:
-  allow-remote: true
+  allow-remote: false
   disable-auto-update-panel: true
   secret-key: "your-management-key"
 
@@ -237,7 +244,7 @@ usage-db-path: "/cpa-plus/data/usage.db"
 logging-to-file: true
 ```
 
-请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。
+请将 `remote-management.secret-key` 设置为你登录 `management.html` 时使用的密钥。只有确实需要远程访问时才修改 `host` 和 `allow-remote`；同时使用强密钥、TLS 反向代理和防火墙或网络访问控制。
 
 凭证文件放在仓库根目录的 `auths/` 下即可，容器内会映射到 `/cpa-plus/auths`。如果文件里已有 `refresh_token`，请保留不要覆盖。
 
@@ -256,6 +263,31 @@ mkdir config && cp config.example.yaml config/config.yaml
 # http://localhost:8317/management.html
 ```
 
+### 调用 API
+
+使用 `config.yaml` 中 `api-keys` 配置的一把客户端密钥：
+
+```bash
+export CPA_API_KEY="replace-with-one-of-your-api-keys"
+
+curl -sS http://127.0.0.1:8317/v1/models \
+  -H "Authorization: Bearer ${CPA_API_KEY}"
+```
+
+从 `/v1/models` 返回结果中选择一个模型：
+
+```bash
+curl -sS http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer ${CPA_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "replace-with-a-model-from-v1-models",
+    "messages": [
+      {"role": "user", "content": "Hello"}
+    ]
+  }'
+```
+
 ### 配置说明
 
 完整配置参考 [config.example.yaml](config.example.yaml)。关键配置项：
@@ -266,7 +298,7 @@ mkdir config && cp config.example.yaml config/config.yaml
 | `gemini-api-key` | Gemini API Key 凭证与模型配置 |
 | `claude-api-key` | Claude API Key 凭证与模型配置 |
 | `codex-api-key` | Codex API Key 凭证与模型配置 |
-| `openai-compatibility` | 上游提供商配置（name、base-url、prefix、api-key、models） |
+| `openai-compatibility` | 上游 provider 配置，包括 `name`、`base-url`、可选的 `prefix`/`priority`/`disabled`/`headers`、`api-key-entries` 和 `models` |
 | `vertex-api-key` | Vertex AI 凭证与模型配置 |
 | `auth-dir` | OAuth 凭证文件目录，包括 Gemini、Claude、Codex 等认证文件 |
 | `usage-statistics-enabled` | 启用使用量追踪和费用计算 |
@@ -274,6 +306,16 @@ mkdir config && cp config.example.yaml config/config.yaml
 | `disable-image-generation` | 控制图片生成端点与非图片请求中的 image tool 注入；compact 请求不会自动注入 image tool |
 | `proxy-url` | 全局上游代理；仅在确实需要时配置 |
 | `remote-management` | 管理面板访问配置（secret-key 用于认证） |
+
+模板中的部分值是有意选择的，不等同于配置项省略时的运行时默认值：
+
+| 配置项 | `config.example.yaml` | 省略时 |
+|--------|-----------------------|--------|
+| `usage-statistics-enabled` | `true` | `false` |
+| `routing.strategy` | `fill-first` | `round-robin` |
+| `force-model-prefix` | `true` | `false` |
+
+管理接口与客户端 API 使用不同的密钥。只有配置了 `remote-management.secret-key`、环境变量 `MANAGEMENT_PASSWORD` 或运行时本地/TUI 密码时，`/v0/management/*` 路由才会注册。YAML 中的明文 `remote-management.secret-key` 会在加载时转换为 bcrypt 哈希，并尝试写回 `config.yaml`；配置文件可写时可持久化该哈希，避免后续启动重复处理明文。非空的 `MANAGEMENT_PASSWORD` 会允许远程管理访问，即使 YAML 中设置了 `allow-remote: false`；仅本机部署时不要无意设置该环境变量。
 
 ## 社区
 
