@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -306,6 +307,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if callID == "" {
 					callID = genToolCallID()
 				}
+				callID = util.SanitizeClaudeToolID(callID)
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
 
@@ -326,10 +328,11 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "function_call_output":
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
-				outputStr := item.Get("output").String()
+				callID = util.SanitizeClaudeToolID(callID)
+				output := item.Get("output")
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				toolResult = applyResponsesToolResultContent(toolResult, output)
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
@@ -396,6 +399,99 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return out
+}
+
+func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []byte {
+	if output.Exists() && output.IsArray() {
+		var partsJSON []string
+		hasImage := false
+		hasFile := false
+		output.ForEach(func(_, part gjson.Result) bool {
+			if partJSON := convertResponsesContentPartToClaude(part); len(partJSON) > 0 {
+				partsJSON = append(partsJSON, string(partJSON))
+				partType := gjson.ParseBytes(partJSON).Get("type").String()
+				hasImage = hasImage || partType == "image"
+				hasFile = hasFile || partType == "document"
+			}
+			return true
+		})
+		if len(partsJSON) == 0 {
+			toolResult, _ = sjson.SetBytes(toolResult, "content", output.Raw)
+			return toolResult
+		}
+		if len(partsJSON) == 1 && !hasImage && !hasFile {
+			textPart := gjson.Parse(partsJSON[0])
+			if textPart.Get("type").String() == "text" {
+				toolResult, _ = sjson.SetBytes(toolResult, "content", textPart.Get("text").String())
+				return toolResult
+			}
+		}
+		contentJSON := []byte("[]")
+		for _, partJSON := range partsJSON {
+			contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(partJSON))
+		}
+		toolResult, _ = sjson.SetRawBytes(toolResult, "content", contentJSON)
+		return toolResult
+	}
+	toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
+	return toolResult
+}
+
+func convertResponsesContentPartToClaude(part gjson.Result) []byte {
+	switch part.Get("type").String() {
+	case "input_text", "output_text":
+		if text := part.Get("text"); text.Exists() {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", text.String())
+			return contentPart
+		}
+	case "input_image":
+		url := part.Get("image_url").String()
+		if url == "" {
+			url = part.Get("url").String()
+		}
+		if url == "" {
+			return nil
+		}
+		if strings.HasPrefix(url, "data:") {
+			mediaAndData := strings.SplitN(strings.TrimPrefix(url, "data:"), ";base64,", 2)
+			if len(mediaAndData) != 2 || mediaAndData[1] == "" {
+				return nil
+			}
+			mediaType := mediaAndData[0]
+			if mediaType == "" {
+				mediaType = "application/octet-stream"
+			}
+			contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+			contentPart, _ = sjson.SetBytes(contentPart, "source.data", mediaAndData[1])
+			return contentPart
+		}
+		contentPart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+		return contentPart
+	case "input_file":
+		fileData := part.Get("file_data").String()
+		if fileData == "" {
+			return nil
+		}
+		mediaType := "application/octet-stream"
+		data := fileData
+		if strings.HasPrefix(fileData, "data:") {
+			mediaAndData := strings.SplitN(strings.TrimPrefix(fileData, "data:"), ";base64,", 2)
+			if len(mediaAndData) == 2 {
+				if mediaAndData[0] != "" {
+					mediaType = mediaAndData[0]
+				}
+				data = mediaAndData[1]
+			}
+		}
+		contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+		contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+		return contentPart
+	}
+	return nil
 }
 
 func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {

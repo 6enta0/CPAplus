@@ -67,6 +67,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		out, _ = sjson.SetBytes(out, "generationConfig.topK", tkr.Num)
 	}
 
+	if mt := gjson.GetBytes(rawJSON, "max_tokens"); mt.Exists() && mt.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", mt.Num)
+	} else if mct := gjson.GetBytes(rawJSON, "max_completion_tokens"); mct.Exists() && mct.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", mct.Num)
+	}
+
 	// Candidate count (OpenAI 'n' parameter)
 	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number {
 		if val := n.Int(); val > 1 {
@@ -290,6 +296,14 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 			}
+		}
+	}
+
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
 		}
 	}
 
