@@ -1,6 +1,6 @@
 # CPAplus
 
-[English](README.md) | [中文](README_CN.md) | 日本語
+[English](README_EN.md) | [中文](README_CN.md) | 日本語
 
 ![CPAplus 管理画面ビュー](static/x5table-view.jpg)
 
@@ -93,6 +93,18 @@ CLI向けにOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供
 
 ## クイックスタート
 
+### 共通設定
+
+どのデプロイ方法でも、実際の環境に合わせて次の設定を確認してください。
+
+- `api-keys`：クライアントが CPAplus へアクセスするための API キー
+- `gemini-api-key`、`claude-api-key`、`codex-api-key`、`openai-compatibility`、`vertex-api-key`：各上流 provider の設定
+- `auth-dir`：Gemini、Claude、Codex などの OAuth 認証情報ファイルを置くディレクトリ。既存の `refresh_token` は保持してください
+- `remote-management.secret-key`：管理ダッシュボードと管理 API のログインキー
+- `proxy-url`：サービスが上流 provider へ接続する際にプロキシが必要な場合のみ設定
+
+> **セキュリティ:** デフォルトの `host: ""` はすべてのネットワークインターフェースで待ち受けます。ローカル利用のみの場合は `host: "127.0.0.1"` を設定し、`remote-management.allow-remote: false` を維持してください。リモートアクセスを許可する場合は、強力な管理キーを使用し、ファイアウォールまたはリバースプロキシで管理ポートへのアクセスを制限してください。
+
 ### 方法1：Dockerデプロイ（Clone不要）
 
 最も簡単な方法—GoやNode.jsのインストール不要。
@@ -108,13 +120,7 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-その後、`config/config.yaml` を編集して実際の API/provider 設定を入力してください。
-
-Docker デプロイで変更が必要な項目:
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
-- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`（コンテナは `network_mode: host` で動作するため、ホスト上のローカルプロキシは `http://127.0.0.1:7890` で指定できます）
+上記の共通設定に従って `config/config.yaml` を編集してください。コンテナは `network_mode: host` を使用します。外向きプロキシが必要な場合のみ `proxy-url` を設定し、ホスト上のローカルプロキシには `http://127.0.0.1:7890` のようなアドレスを使用できます。
 
 次の Docker 用パスとオプションはそのまま維持してください:
 
@@ -170,11 +176,7 @@ docker image prune -f
 
 Goがインストール済みのユーザー向け。
 
-`go run` で変更が必要な項目:
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
-- ローカルプロセスが本当に外向きプロキシを必要とする場合のみ `proxy-url`
+上記の共通設定に従って `config.yaml` を準備してください。ローカルプロセスが外向きプロキシを必要とする場合のみ `proxy-url` を設定します。
 
 リポジトリのルートで `go run ./cmd/server --config config.yaml` を実行する場合は、`config.example.yaml` のローカルパス既定値をそのまま使えます:
 
@@ -220,11 +222,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 
 カスタマイズして独自イメージをビルドしたい開発者向け。
 
-この方法も実行時には方法1と同じ `docker-compose.yml` のマウント構成を使います。ビルド前に変更が必要な項目:
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` などの上流 provider 設定
-- `remote-management.secret-key` を設定し、管理ダッシュボード/API のログインに使用
-- コンテナが本当に外向きプロキシを必要とする場合のみ `proxy-url`（コンテナは `network_mode: host` で動作するため、ホスト上のローカルプロキシは `http://127.0.0.1:7890` で指定できます）
+この方法も、方法1と同じ `docker-compose.yml` のマウント構成と共通設定を使用します。コンテナは `network_mode: host` で動作し、外向きプロキシが必要な場合は `http://127.0.0.1:7890` のようなアドレスでホスト上のプロキシを指定できます。
 
 この Docker ベースの方法では、次のコンテナパスとオプションをそのまま維持してください:
 
@@ -265,10 +263,16 @@ mkdir config && cp config.example.yaml config/config.yaml
 | 設定項目 | 説明 |
 |----------|------|
 | `api-keys` | プロキシにアクセスするためのクライアントAPIキー |
-| `openai-compatibility` | 上游プロバイダー設定（name、base-url、prefix、api-key、models） |
-| `codex` | Codex（OpenAI OAuth）クレデンシャル設定 |
+| `gemini-api-key` | Gemini API Key 認証情報とモデル設定 |
+| `claude-api-key` | Claude API Key 認証情報とモデル設定 |
+| `codex-api-key` | Codex API Key 認証情報とモデル設定 |
+| `openai-compatibility` | 上流 provider 設定（name、base-url、prefix、api-key、models） |
+| `vertex-api-key` | Vertex AI 認証情報とモデル設定 |
+| `auth-dir` | Gemini、Claude、Codex などの OAuth 認証情報ファイルを置くディレクトリ |
 | `usage-statistics-enabled` | 使用量トラッキングとコスト計算を有効化 |
 | `usage-db-path` | SQLiteデータベースパス、使用データを永続化（デフォルト：`usage.db`） |
+| `disable-image-generation` | 画像生成エンドポイントと非画像リクエストへの image tool 注入を制御。compact リクエストには image tool を自動注入しません |
+| `proxy-url` | 上流 provider 向けのグローバルプロキシ。必要な場合のみ設定 |
 | `remote-management` | 管理ダッシュボードアクセス設定（secret-keyで認証） |
 
 ## コミュニティ

@@ -93,6 +93,18 @@ Modified from:
 
 ## Quick Start
 
+### Common Configuration
+
+Review these settings for every deployment method:
+
+- `api-keys`: client API keys used to access CPAplus
+- `gemini-api-key`, `claude-api-key`, `codex-api-key`, `openai-compatibility`, and `vertex-api-key`: upstream provider configuration
+- `auth-dir`: directory for Gemini, Claude, Codex, and other OAuth credential files; preserve existing `refresh_token` fields
+- `remote-management.secret-key`: login key for the management dashboard and management API
+- `proxy-url`: configure only when the service must reach upstream providers through a proxy
+
+> **Security:** The default `host: ""` listens on all network interfaces. For local-only use, set `host: "127.0.0.1"` and keep `remote-management.allow-remote: false`. For remote access, use a strong management key and restrict the management port with a firewall or reverse proxy.
+
 ### Option 1: Docker (No Clone Required)
 
 The easiest way — no Go or Node.js installation needed.
@@ -108,13 +120,7 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-Then update `config/config.yaml` with your real API/provider settings.
-
-Change these fields for Docker deployment:
-- `api-keys`
-- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` for logging into the management dashboard/API
-- `proxy-url` only if the container really needs an outbound proxy (the container uses `network_mode: host`, so a local proxy on the host can be set as `http://127.0.0.1:7890`)
+Then update `config/config.yaml` using the common configuration above. The container uses `network_mode: host`; configure `proxy-url` only when an outbound proxy is required, using an address such as `http://127.0.0.1:7890` for a proxy running on the host.
 
 Keep these Docker-specific paths and options exactly as shown:
 
@@ -170,11 +176,7 @@ docker image prune -f
 
 For users who want to run directly with Go.
 
-Change these fields for `go run`:
-- `api-keys`
-- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` for logging into the management dashboard/API
-- `proxy-url` only if your local process really needs an outbound proxy
+Prepare `config.yaml` using the common configuration above. Set `proxy-url` only if the local process requires an outbound proxy.
 
 When running from the repo root with `go run ./cmd/server --config config.yaml`, you can keep the default local paths in `config.example.yaml` as-is:
 
@@ -220,11 +222,7 @@ After replacing `static/management.html`, hard-refresh the browser. A Go server 
 
 For developers who want to customize and build their own image.
 
-This option uses the same `docker-compose.yml` runtime layout as Option 1. Change these fields before building:
-- `api-keys`
-- upstream provider sections such as `openai-compatibility`, `gemini`, `claude`, or `codex`
-- `remote-management.secret-key` for logging into the management dashboard/API
-- `proxy-url` only if the container really needs an outbound proxy (the container uses `network_mode: host`, so a local proxy on the host can be set as `http://127.0.0.1:7890`)
+This option uses the same `docker-compose.yml` runtime layout and common configuration as Option 1. The container uses `network_mode: host`; when an outbound proxy is required, an address such as `http://127.0.0.1:7890` can target a proxy running on the host.
 
 Keep these container paths exactly as shown for this Docker-based option:
 
@@ -265,10 +263,16 @@ See [config.example.yaml](config.example.yaml) for full configuration reference.
 | Setting | Description |
 |---------|-------------|
 | `api-keys` | Client API keys for accessing the proxy |
+| `gemini-api-key` | Gemini API key credentials and model configuration |
+| `claude-api-key` | Claude API key credentials and model configuration |
+| `codex-api-key` | Codex API key credentials and model configuration |
 | `openai-compatibility` | Upstream provider configs (name, base-url, prefix, api-key, models) |
-| `codex` | Codex (OpenAI OAuth) credential configs |
+| `vertex-api-key` | Vertex AI credentials and model configuration |
+| `auth-dir` | OAuth credential directory for Gemini, Claude, Codex, and other auth files |
 | `usage-statistics-enabled` | Enable usage tracking and cost calculation |
 | `usage-db-path` | SQLite database path for usage persistence (default: `usage.db`) |
+| `disable-image-generation` | Controls image endpoints and image-tool injection in non-image requests; compact requests never auto-inject the image tool |
+| `proxy-url` | Global upstream proxy; configure only when required |
 | `remote-management` | Management dashboard access (secret-key for auth) |
 
 ## Community

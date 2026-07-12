@@ -1,6 +1,6 @@
 # CPAplus
 
-[English](README.md) | 中文 | [日本語](README_JA.md)
+[English](README_EN.md) | 中文 | [日本語](README_JA.md)
 
 ![CPAplus 管理界面视图](static/x5table-view.jpg)
 
@@ -93,6 +93,18 @@
 
 ## 快速开始
 
+### 部署前通用配置
+
+无论使用哪种部署方式，都需要根据实际情况检查以下配置：
+
+- `api-keys`：客户端访问 CPAplus 使用的 API 密钥
+- `gemini-api-key`、`claude-api-key`、`codex-api-key`、`openai-compatibility`、`vertex-api-key`：对应的上游 provider 配置
+- `auth-dir`：Gemini、Claude、Codex 等 OAuth 凭证文件目录；保留凭证中已有的 `refresh_token`
+- `remote-management.secret-key`：管理面板和管理 API 的登录密钥
+- `proxy-url`：仅在服务确实需要通过代理访问上游时设置
+
+> **安全提示：** 默认 `host: ""` 会监听所有网络接口。若服务只供本机使用，建议设置 `host: "127.0.0.1"` 并保持 `remote-management.allow-remote: false`。需要远程访问时，请使用强管理密钥，并通过防火墙或反向代理限制管理端口的访问范围。
+
 ### 方式一：Docker 部署（无需 Clone）
 
 最简单的方式——无需安装 Go 或 Node.js。
@@ -108,13 +120,7 @@ curl -O https://raw.githubusercontent.com/6enta0/CPAplus/main/docker-compose.yml
 mkdir config && mv config.example.yaml config/config.yaml
 ```
 
-然后编辑 `config/config.yaml`，填入你实际的 API/provider 配置。
-
-Docker 部署需要改动的项：
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
-- 只有容器确实需要出站代理时才设置 `proxy-url`（容器使用 `network_mode: host`，可直接用 `http://127.0.0.1:7890` 指向宿主机本地代理）
+然后按照上述通用配置说明编辑 `config/config.yaml`。容器使用 `network_mode: host`；只有容器确实需要出站代理时才设置 `proxy-url`，此时可以用 `http://127.0.0.1:7890` 指向宿主机本地代理。
 
 下面这些 Docker 路径和选项请按原样保留：
 
@@ -170,11 +176,7 @@ docker image prune -f
 
 适合已安装 Go 的用户。
 
-`go run` 方式需要改动的项：
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
-- 只有本地进程确实需要出站代理时才设置 `proxy-url`
+按照上述通用配置说明准备 `config.yaml`。只有本地进程确实需要出站代理时才设置 `proxy-url`。
 
 如果你是在仓库根目录执行 `go run ./cmd/server --config config.yaml`，则可以保持 `config.example.yaml` 里的本地路径默认值不变：
 
@@ -220,11 +222,7 @@ cp dist/index.html ~/projects/github_repos/CPAplus/static/management.html
 
 适合想自定义并构建自己镜像的开发者。
 
-这种方式运行时仍然使用与方式一相同的 `docker-compose.yml` 挂载布局。构建前需要改动的项：
-- `api-keys`
-- `openai-compatibility`、`gemini`、`claude`、`codex` 等上游 provider 配置
-- 需要设置 `remote-management.secret-key`，用于登录管理面板/API
-- 只有容器确实需要出站代理时才设置 `proxy-url`（容器使用 `network_mode: host`，可直接用 `http://127.0.0.1:7890` 指向宿主机本地代理）
+这种方式运行时仍然使用与方式一相同的 `docker-compose.yml` 挂载布局和通用配置。容器使用 `network_mode: host`；需要出站代理时，可以用 `http://127.0.0.1:7890` 指向宿主机本地代理。
 
 下面这些容器路径和选项请按原样保留：
 
@@ -265,10 +263,16 @@ mkdir config && cp config.example.yaml config/config.yaml
 | 配置项 | 说明 |
 |--------|------|
 | `api-keys` | 客户端访问代理的 API 密钥 |
+| `gemini-api-key` | Gemini API Key 凭证与模型配置 |
+| `claude-api-key` | Claude API Key 凭证与模型配置 |
+| `codex-api-key` | Codex API Key 凭证与模型配置 |
 | `openai-compatibility` | 上游提供商配置（name、base-url、prefix、api-key、models） |
-| `codex` | Codex（OpenAI OAuth）凭证配置 |
+| `vertex-api-key` | Vertex AI 凭证与模型配置 |
+| `auth-dir` | OAuth 凭证文件目录，包括 Gemini、Claude、Codex 等认证文件 |
 | `usage-statistics-enabled` | 启用使用量追踪和费用计算 |
 | `usage-db-path` | SQLite 数据库路径，持久化使用数据（默认：`usage.db`） |
+| `disable-image-generation` | 控制图片生成端点与非图片请求中的 image tool 注入；compact 请求不会自动注入 image tool |
+| `proxy-url` | 全局上游代理；仅在确实需要时配置 |
 | `remote-management` | 管理面板访问配置（secret-key 用于认证） |
 
 ## 社区
