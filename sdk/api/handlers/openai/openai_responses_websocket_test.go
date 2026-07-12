@@ -85,6 +85,74 @@ func (e websocketPinnedFailoverStatusError) Error() string { return e.msg }
 
 func (e websocketPinnedFailoverStatusError) StatusCode() int { return e.status }
 
+type websocketBootstrapFallbackExecutor struct {
+	mu       sync.Mutex
+	authIDs  []string
+	payloads map[string][][]byte
+}
+
+func (e *websocketBootstrapFallbackExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketBootstrapFallbackExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	if e.payloads == nil {
+		e.payloads = make(map[string][][]byte)
+	}
+	e.authIDs = append(e.authIDs, authID)
+	e.payloads[authID] = append(e.payloads[authID], bytes.Clone(req.Payload))
+	e.mu.Unlock()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	if authID == "auth-ws" {
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusServiceUnavailable,
+			msg:    `{"error":{"message":"websocket bootstrap failed","type":"server_error","code":"ws_failed"}}`,
+		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-http","output":[{"type":"message","id":"out-http"}]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketBootstrapFallbackExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketBootstrapFallbackExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketBootstrapFallbackExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketBootstrapFallbackExecutor) Payloads(authID string) [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	src := e.payloads[authID]
+	out := make([][]byte, len(src))
+	for i := range src {
+		out[i] = bytes.Clone(src[i])
+	}
+	return out
+}
+
 type websocketUpstreamDisconnectExecutor struct {
 	mu         sync.Mutex
 	subscribed chan string
