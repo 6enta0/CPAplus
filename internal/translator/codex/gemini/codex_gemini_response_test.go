@@ -34,6 +34,14 @@ func TestConvertCodexResponseToGemini_StreamEmptyOutputUsesOutputItemDoneMessage
 	}
 }
 
+func TestConvertCodexResponseToGeminiNonStreamIncompleteMaxTokens(t *testing.T) {
+	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}`)
+	out := ConvertCodexResponseToGeminiNonStream(context.Background(), "gemini-test", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+		t.Fatalf("finishReason = %q, want MAX_TOKENS; output=%s", got, out)
+	}
+}
+
 func TestConvertCodexResponseToGemini_StreamPartialImageEmitsInlineData(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"tools":[]}`)

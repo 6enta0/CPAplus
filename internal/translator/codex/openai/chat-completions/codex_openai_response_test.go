@@ -29,6 +29,17 @@ func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *test
 	}
 }
 
+func TestConvertCodexResponseToOpenAINonStreamIncompleteMaxTokens(t *testing.T) {
+	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}`)
+	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("finish_reason = %q, want length; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.native_finish_reason").String(); got != "max_output_tokens" {
+		t.Fatalf("native_finish_reason = %q, want max_output_tokens; output=%s", got, out)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.T) {
 	ctx := context.Background()
 	var param any
