@@ -28,6 +28,17 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDs(t *testing.T
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaudeDropsApplyPatchCustomTool(t *testing.T) {
+	raw := []byte(`{"input":"hi","tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 1 {
+		t.Fatalf("tool count = %d, want 1; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "exec_command" {
+		t.Fatalf("tool name = %q, want exec_command; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesInputImage(t *testing.T) {
 	const imageB64 = "iVBORw0KGgo="
 	dataURL := "data:image/png;base64," + imageB64

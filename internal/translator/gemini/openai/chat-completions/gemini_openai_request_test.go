@@ -25,6 +25,18 @@ func TestConvertOpenAIRequestToGemini_MapsMaxTokens(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToGeminiCleansToolSchema(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"search","parameters":{"type":"object","title":"Search","properties":{"query":{"type":"string"}},"required":["query","stale"]}}}]}`)
+	out := ConvertOpenAIRequestToGemini("gemini-test", input, false)
+	schema := gjson.GetBytes(out, "tools.0.functionDeclarations.0.parametersJsonSchema")
+	if schema.Get("title").Exists() {
+		t.Fatalf("schema title was not removed: %s", schema.Raw)
+	}
+	if required := schema.Get("required").Array(); len(required) != 1 || required[0].String() != "query" {
+		t.Fatalf("required fields were not cleaned: %s", schema.Raw)
+	}
+}
+
 func TestConvertOpenAIRequestToGemini_StripsTrailingAssistantPrefill(t *testing.T) {
 	raw := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"prefill"}]}`)
 	out := ConvertOpenAIRequestToGemini("gemini-test", raw, false)

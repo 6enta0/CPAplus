@@ -90,6 +90,28 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodexServiceTier(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "priority", value: `"priority"`, want: "priority"},
+		{name: "fast", value: `"fast"`, want: "priority"},
+		{name: "unsupported", value: `"default"`},
+		{name: "non-string", value: `true`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"service_tier":` + tc.value + `}`)
+			out := ConvertClaudeRequestToCodex("gpt-5", raw, false)
+			if got := gjson.GetBytes(out, "service_tier").String(); got != tc.want {
+				t.Fatalf("service_tier = %q, want %q; output=%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name                  string
