@@ -32,3 +32,15 @@ func TestConvertOpenAIRequestToAntigravityDisambiguatesAndDeduplicatesTools(t *t
 		t.Fatalf("tool choice name does not match declaration: %s", out)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityPreservesReasoningVisibleTextAndToolCall(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":"visible","reasoning_content":"thinking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	out := ConvertOpenAIRequestToAntigravity("gemini-test", input, false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) != 3 || parts[0].Get("text").String() != "thinking" || !parts[0].Get("thought").Bool() {
+		t.Fatalf("reasoning part missing or out of order: %s", out)
+	}
+	if parts[1].Get("text").String() != "visible" || parts[2].Get("functionCall.name").String() != "lookup" {
+		t.Fatalf("visible text or tool call missing: %s", out)
+	}
+}

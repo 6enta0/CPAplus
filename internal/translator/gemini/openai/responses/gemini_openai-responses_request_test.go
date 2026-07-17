@@ -20,6 +20,29 @@ func TestConvertOpenAIResponsesRequestToGemini_StripsTrailingAssistantPrefill(t 
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGeminiPreservesReasoningAndVisibleText(t *testing.T) {
+	input := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"signature"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToGemini("gemini-test", input, false)
+	parts := gjson.GetBytes(out, "contents.0.parts").Array()
+	if len(parts) != 2 || parts[0].Get("text").String() != "thinking" || !parts[0].Get("thought").Bool() {
+		t.Fatalf("reasoning part missing: %s", out)
+	}
+	if parts[0].Get("thoughtSignature").String() != "signature" || parts[1].Get("text").String() != "visible" {
+		t.Fatalf("signature or visible text missing: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiKeepsTrailingReasoningHistory(t *testing.T) {
+	input := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToGemini("gemini-test", input, false)
+	if got := gjson.GetBytes(out, "contents.0.parts.0.text").String(); got != "thinking" {
+		t.Fatalf("trailing reasoning was stripped: %s", out)
+	}
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != geminiResponsesThoughtSignature {
+		t.Fatalf("missing signature fallback: %s", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToGeminiStructuredOutputAndToolSchema(t *testing.T) {
 	input := []byte(`{
 		"input":"hi",

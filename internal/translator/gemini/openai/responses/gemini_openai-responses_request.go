@@ -110,7 +110,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			i++
 		}
 
-		for _, item := range normalized {
+		for itemIndex := 0; itemIndex < len(normalized); itemIndex++ {
+			item := normalized[itemIndex]
 			itemType := item.Get("type").String()
 			itemRole := item.Get("role").String()
 			if itemType == "" && itemRole != "" {
@@ -356,9 +357,21 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				thoughtContent := []byte(`{"role":"model","parts":[]}`)
 				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
 				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.SetBytes(thought, "thoughtSignature", item.Get("encrypted_content").String())
+				signature := item.Get("encrypted_content").String()
+				if signature == "" {
+					signature = geminiResponsesThoughtSignature
+				}
+				thought, _ = sjson.SetBytes(thought, "thoughtSignature", signature)
 
 				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
+				if itemIndex+1 < len(normalized) {
+					if visibleText, ok := openAIResponsesVisibleAssistantText(normalized[itemIndex+1]); ok {
+						visible := []byte(`{"text":""}`)
+						visible, _ = sjson.SetBytes(visible, "text", visibleText)
+						thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", visible)
+						itemIndex++
+					}
+				}
 				out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)
 			}
 		}
@@ -372,7 +385,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	contents := gjson.GetBytes(out, "contents")
 	if contents.Exists() && contents.IsArray() {
 		arr := contents.Array()
-		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+		if len(arr) > 0 && shouldStripTrailingResponsesModelPrefill(arr[len(arr)-1]) {
 			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
 		}
 	}
@@ -496,4 +509,42 @@ func ensureGeminiGenerationConfig(out []byte) []byte {
 		out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(`{}`))
 	}
 	return out
+}
+
+func openAIResponsesVisibleAssistantText(item gjson.Result) (string, bool) {
+	itemType := item.Get("type").String()
+	if itemType == "" && item.Get("role").String() != "" {
+		itemType = "message"
+	}
+	if itemType != "message" {
+		return "", false
+	}
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		return content.String(), true
+	}
+	if !content.IsArray() {
+		return "", false
+	}
+	var parts []string
+	found := false
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "output_text" {
+			found = true
+			parts = append(parts, part.Get("text").String())
+		}
+	}
+	return strings.Join(parts, "\n"), found
+}
+
+func shouldStripTrailingResponsesModelPrefill(content gjson.Result) bool {
+	if content.Get("role").String() != "model" {
+		return false
+	}
+	for _, part := range content.Get("parts").Array() {
+		if part.Get("thought").Bool() {
+			return false
+		}
+	}
+	return true
 }
