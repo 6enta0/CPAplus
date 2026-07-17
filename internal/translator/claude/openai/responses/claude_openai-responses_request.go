@@ -518,6 +518,9 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 			return [][]byte{tJSON}
 		}
 	default:
+		if toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch" {
+			return nil
+		}
 		if isUnsupportedOpenAIBuiltinToolType(toolType) {
 			return nil
 		}

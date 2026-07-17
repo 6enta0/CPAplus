@@ -32,6 +32,17 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsFlattensNamespaceTo
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesStructuredToolChoice(t *testing.T) {
+	raw := []byte(`{"input":[{"role":"user","content":"Run command."}],"tool_choice":{"type":"function","function":{"name":"run_command"}}}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "run_command" {
+		t.Fatalf("tool_choice.function.name = %q, want run_command; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMergesAdditionalCustomTools(t *testing.T) {
 	raw := []byte(`{
 		"tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
