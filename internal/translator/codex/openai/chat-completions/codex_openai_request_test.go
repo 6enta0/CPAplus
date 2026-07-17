@@ -771,6 +771,50 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	}
 }
 
+func TestCustomToolCallHistoryPreservesFamilyAndSynthesizesID(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"assistant","tool_calls":[{"type":"custom","custom":{"name":"apply_patch","input":"patch"}}]},
+			{"role":"tool","content":"patched"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("input item count = %d, want 2: %s", len(items), out)
+	}
+	if got := items[0].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("call type = %q, want custom_tool_call", got)
+	}
+	if got := items[1].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("output type = %q, want custom_tool_call_output", got)
+	}
+	callID := items[0].Get("call_id").String()
+	if callID == "" || items[1].Get("call_id").String() != callID {
+		t.Fatalf("call/output IDs do not match: %s", out)
+	}
+}
+
+func TestAmbiguousDuplicateToolCallIDsAreDropped(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"user","content":"run both"},
+			{"role":"assistant","tool_calls":[
+				{"id":"duplicate","type":"function","function":{"name":"lookup","arguments":"{}"}},
+				{"id":"duplicate","type":"custom","custom":{"name":"apply_patch","input":"patch"}}
+			]},
+			{"role":"tool","tool_call_id":"duplicate","content":"result"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 1 || items[0].Get("role").String() != "user" {
+		t.Fatalf("ambiguous calls should be dropped: %s", out)
+	}
+}
+
 // Tools array should carry over to the Responses format output.
 func TestToolsDefinitionTranslated(t *testing.T) {
 	input := []byte(`{
