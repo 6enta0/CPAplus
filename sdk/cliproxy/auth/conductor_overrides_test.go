@@ -68,6 +68,24 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 }
 
+type testRequestScopedStatusError struct{}
+
+func (testRequestScopedStatusError) Error() string         { return "stream closed before terminal event" }
+func (testRequestScopedStatusError) StatusCode() int       { return http.StatusRequestTimeout }
+func (testRequestScopedStatusError) IsRequestScoped() bool { return true }
+
+func TestRequestScopedExecutorErrorDoesNotDisableAuth(t *testing.T) {
+	resultErr := resultErrorFromError(testRequestScopedStatusError{})
+	if resultErr == nil || !resultErr.IsRequestScoped() || resultErr.HTTPStatus != http.StatusRequestTimeout {
+		t.Fatalf("result error did not preserve request scope and status: %#v", resultErr)
+	}
+	auth := &Auth{ID: "auth-1", Status: StatusActive}
+	applyAuthFailureState(auth, resultErr, nil, time.Now())
+	if auth.Unavailable || auth.Status != StatusActive {
+		t.Fatalf("request-scoped error disabled auth: %#v", auth)
+	}
+}
+
 func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(3, 30*time.Second, 0)
