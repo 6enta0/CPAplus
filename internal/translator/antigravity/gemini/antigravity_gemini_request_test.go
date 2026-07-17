@@ -425,3 +425,30 @@ func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 		t.Errorf("Expected second group name 'Grep', got '%s'", name1)
 	}
 }
+
+func TestConvertGeminiRequestToAntigravityDisambiguatesAndDeduplicatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	input := []byte(`{
+		"contents":[{"role":"model","parts":[{"functionCall":{"name":"` + second + `","args":{}}}]}],
+		"tools":[
+			{"functionDeclarations":[{"name":"lookup"},{"name":"` + first + `"}]},
+			{"function_declarations":[{"name":"lookup"},{"name":"` + second + `"}]}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	camel := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	snake := gjson.GetBytes(out, "request.tools.1.function_declarations").Array()
+	if len(camel)+len(snake) != 3 {
+		t.Fatalf("declaration count = %d, want 3: %s", len(camel)+len(snake), out)
+	}
+	firstMapped := camel[1].Get("name").String()
+	secondMapped := snake[0].Get("name").String()
+	if firstMapped == secondMapped || len(firstMapped) > 64 || len(secondMapped) > 64 {
+		t.Fatalf("collision was not safely disambiguated: %q, %q", firstMapped, secondMapped)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != secondMapped {
+		t.Fatalf("function call name = %q, want %q", got, secondMapped)
+	}
+}

@@ -128,3 +128,33 @@ func TestRestoreSanitizedToolName(t *testing.T) {
 		t.Errorf("expected empty for empty name, got %q", got)
 	}
 }
+
+func TestSanitizedFunctionNameMapDisambiguatesCollisionsDeterministically(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	raw := []byte(`{"tools":[{"name":"` + second + `"},{"name":"` + first + `"},{"name":"` + second + `"}]}`)
+
+	nameMap := SanitizedFunctionNameMap(raw)
+	if nameMap[first] == nameMap[second] {
+		t.Fatalf("colliding names map to %q", nameMap[first])
+	}
+	if len(nameMap[first]) > 64 || len(nameMap[second]) > 64 {
+		t.Fatalf("mapped names exceed 64 bytes: %q, %q", nameMap[first], nameMap[second])
+	}
+	if repeated := SanitizedFunctionNameMap(raw); repeated[first] != nameMap[first] || repeated[second] != nameMap[second] {
+		t.Fatalf("mapping is not deterministic: %v then %v", nameMap, repeated)
+	}
+	reverse := DisambiguatedToolNameMap(raw)
+	if reverse[nameMap[first]] != first || reverse[nameMap[second]] != second {
+		t.Fatalf("reverse mapping does not restore originals: %v", reverse)
+	}
+}
+
+func TestDeduplicateFunctionDeclarationsPreservesFirstDeclaration(t *testing.T) {
+	raw := []byte(`[{"name":"lookup","description":"first"},{"name":"lookup","description":"second"},{"name":"other"},{"description":"unnamed"}]`)
+	got := string(DeduplicateFunctionDeclarations(raw))
+	want := `[{"name":"lookup","description":"first"},{"name":"other"},{"description":"unnamed"}]`
+	if got != want {
+		t.Fatalf("DeduplicateFunctionDeclarations() = %s, want %s", got, want)
+	}
+}

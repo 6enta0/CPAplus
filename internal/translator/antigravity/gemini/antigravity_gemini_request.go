@@ -34,6 +34,7 @@ import (
 //   - []byte: The transformed request data in Gemini API format
 func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
+	functionNameMap := util.SanitizedFunctionNameMap(inputRawJSON)
 	template := `{"project":"","request":{},"model":""}`
 	templateBytes, _ := sjson.SetRawBytes([]byte(template), "request", rawJSON)
 	templateBytes, _ = sjson.SetBytes(templateBytes, "model", modelName)
@@ -80,23 +81,8 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		})
 	}
 
-	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
-	if toolsResult.Exists() && toolsResult.IsArray() {
-		toolResults := toolsResult.Array()
-		for i := 0; i < len(toolResults); i++ {
-			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
-			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
-				functionDeclarationsResults := functionDeclarationsResult.Array()
-				for j := 0; j < len(functionDeclarationsResults); j++ {
-					parametersResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
-					if parametersResult.Exists() {
-						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j), fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
-						rawJSON = []byte(strJson)
-					}
-				}
-			}
-		}
-	}
+	rawJSON = normalizeGeminiFunctionTools(rawJSON, functionNameMap)
+	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
 
 	// Gemini-specific handling for non-Claude models:
 	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
@@ -134,6 +120,81 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+}
+
+func normalizeGeminiFunctionTools(rawJSON []byte, functionNameMap map[string]string) []byte {
+	tools := gjson.GetBytes(rawJSON, "request.tools")
+	seenNames := make(map[string]struct{})
+	for toolIndex := range tools.Array() {
+		for _, key := range []string{"functionDeclarations", "function_declarations"} {
+			path := fmt.Sprintf("request.tools.%d.%s", toolIndex, key)
+			declarations := gjson.GetBytes(rawJSON, path)
+			if !declarations.IsArray() {
+				continue
+			}
+			parts := make([]string, 0, len(declarations.Array()))
+			for _, declaration := range declarations.Array() {
+				mappedName := util.MapSanitizedFunctionName(functionNameMap, declaration.Get("name").String())
+				if mappedName != "" {
+					if _, exists := seenNames[mappedName]; exists {
+						continue
+					}
+					seenNames[mappedName] = struct{}{}
+				}
+				declarationJSON := []byte(declaration.Raw)
+				declarationJSON, _ = sjson.SetBytes(declarationJSON, "name", mappedName)
+				if parameters := declaration.Get("parameters"); parameters.Exists() {
+					declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(parameters.Raw))
+					declarationJSON, _ = sjson.DeleteBytes(declarationJSON, "parameters")
+				}
+				parts = append(parts, string(declarationJSON))
+			}
+			rawJSON, _ = sjson.SetRawBytes(rawJSON, path, []byte("["+strings.Join(parts, ",")+"]"))
+		}
+	}
+	return removeEmptyGeminiFunctionTools(rawJSON)
+}
+
+func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
+	cleaned := []byte(`[]`)
+	for _, tool := range gjson.GetBytes(rawJSON, "request.tools").Array() {
+		toolJSON := []byte(tool.Raw)
+		for _, key := range []string{"functionDeclarations", "function_declarations"} {
+			if declarations := tool.Get(key); declarations.IsArray() && len(declarations.Array()) == 0 {
+				toolJSON, _ = sjson.DeleteBytes(toolJSON, key)
+			}
+		}
+		if len(gjson.ParseBytes(toolJSON).Map()) == 0 {
+			continue
+		}
+		cleaned, _ = sjson.SetRawBytes(cleaned, "-1", toolJSON)
+	}
+	if len(gjson.ParseBytes(cleaned).Array()) == 0 {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tools")
+		return rawJSON
+	}
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", cleaned)
+	return rawJSON
+}
+
+func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]string) []byte {
+	for contentIndex, content := range gjson.GetBytes(rawJSON, "request.contents").Array() {
+		for partIndex, part := range content.Get("parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
+				name := part.Get(field + ".name").String()
+				if name != "" {
+					path := fmt.Sprintf("request.contents.%d.parts.%d.%s.name", contentIndex, partIndex, field)
+					rawJSON, _ = sjson.SetBytes(rawJSON, path, util.MapSanitizedFunctionName(functionNameMap, name))
+				}
+			}
+		}
+	}
+	for _, allowedPath := range []string{"request.toolConfig.functionCallingConfig.allowedFunctionNames", "request.tool_config.function_calling_config.allowed_function_names"} {
+		for index, name := range gjson.GetBytes(rawJSON, allowedPath).Array() {
+			rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("%s.%d", allowedPath, index), util.MapSanitizedFunctionName(functionNameMap, name.String()))
+		}
+	}
+	return rawJSON
 }
 
 // FunctionCallGroup represents a group of function calls and their responses

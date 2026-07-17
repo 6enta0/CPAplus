@@ -22,6 +22,29 @@ func testAnthropicNativeSignature(t *testing.T) string {
 	return signature
 }
 
+func TestConvertClaudeRequestToAntigravityDisambiguatesAndDeduplicatesTools(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	input := []byte(`{
+		"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"` + second + `","input":{}}]}],
+		"tools":[
+			{"name":"lookup","input_schema":{"type":"object"}},
+			{"name":"lookup","input_schema":{"type":"object"}},
+			{"name":"` + first + `","input_schema":{"type":"object"}},
+			{"name":"` + second + `","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToAntigravity("gemini-3-flash", input, false)
+	declarations := gjson.GetBytes(out, "request.tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("declaration count = %d, want 3: %s", len(declarations), out)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.name").String(); got != declarations[2].Get("name").String() {
+		t.Fatalf("function call name does not match declaration: %s", out)
+	}
+}
+
 func testMinimalAnthropicSignature(t *testing.T) string {
 	t.Helper()
 

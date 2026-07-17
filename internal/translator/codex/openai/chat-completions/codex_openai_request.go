@@ -93,6 +93,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Extract system instructions from first system message (string or text object)
 	messages := gjson.GetBytes(rawJSON, "messages")
+	type pendingToolCall struct {
+		callID       string
+		sourceCallID string
+		callType     string
+		consumed     bool
+	}
+	var pendingToolCalls []pendingToolCall
+	ambiguousToolCallIDs := map[string]struct{}{}
 	// if messages.IsArray() {
 	// 	arr := messages.Array()
 	// 	for i := 0; i < len(arr); i++ {
@@ -119,18 +127,36 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 			switch role {
 			case "tool":
-				// Handle tool response messages as top-level function_call_output objects
 				toolCallID := m.Get("tool_call_id").String()
-				content := m.Get("content")
-
-				// Create function_call_output object
-				funcOutput := []byte(`{}`)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
-				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
-				funcOutput = setToolCallOutputContent(funcOutput, content)
-				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
+				if _, ambiguous := ambiguousToolCallIDs[toolCallID]; toolCallID != "" && ambiguous {
+					continue
+				}
+				pendingIndex := -1
+				for index := range pendingToolCalls {
+					pendingCall := &pendingToolCalls[index]
+					if !pendingCall.consumed && (toolCallID == "" || pendingCall.sourceCallID == toolCallID || pendingCall.callID == toolCallID) {
+						pendingIndex = index
+						break
+					}
+				}
+				if pendingIndex < 0 {
+					continue
+				}
+				pendingCall := &pendingToolCalls[pendingIndex]
+				pendingCall.consumed = true
+				outputType := "function_call_output"
+				if pendingCall.callType == "custom" {
+					outputType = "custom_tool_call_output"
+				}
+				toolOutput := []byte(`{}`)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "type", outputType)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "call_id", pendingCall.callID)
+				toolOutput = setToolCallOutputContent(toolOutput, m.Get("content"))
+				out, _ = sjson.SetRawBytes(out, "input.-1", toolOutput)
 
 			default:
+				pendingToolCalls = nil
+				ambiguousToolCallIDs = map[string]struct{}{}
 				// Handle regular messages
 				msg := []byte(`{}`)
 				msg, _ = sjson.SetBytes(msg, "type", "message")
@@ -209,13 +235,50 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					toolCalls := m.Get("tool_calls")
 					if toolCalls.Exists() && toolCalls.IsArray() {
 						toolCallsArr := toolCalls.Array()
+						callIDCounts := map[string]int{}
+						usedCallIDs := map[string]struct{}{}
+						for _, tc := range toolCallsArr {
+							callType := tc.Get("type").String()
+							callID := tc.Get("id").String()
+							if (callType == "function" || callType == "custom") && callID != "" {
+								callIDCounts[callID]++
+								usedCallIDs[callID] = struct{}{}
+							}
+						}
+						for callID, count := range callIDCounts {
+							if count > 1 {
+								ambiguousToolCallIDs[callID] = struct{}{}
+							}
+						}
 						for j := 0; j < len(toolCallsArr); j++ {
 							tc := toolCallsArr[j]
-							if tc.Get("type").String() == "function" {
+							callType := tc.Get("type").String()
+							if callType != "function" && callType != "custom" {
+								continue
+							}
+							sourceCallID := tc.Get("id").String()
+							if _, ambiguous := ambiguousToolCallIDs[sourceCallID]; sourceCallID != "" && ambiguous {
+								continue
+							}
+							callID := sourceCallID
+							if callID == "" {
+								baseCallID := "call_missing_" + strconv.Itoa(i) + "_" + strconv.Itoa(j)
+								callID = baseCallID
+								for suffix := 1; ; suffix++ {
+									if _, used := usedCallIDs[callID]; !used {
+										break
+									}
+									callID = baseCallID + "_" + strconv.Itoa(suffix)
+								}
+								usedCallIDs[callID] = struct{}{}
+							}
+							pendingToolCalls = append(pendingToolCalls, pendingToolCall{callID: callID, sourceCallID: sourceCallID, callType: callType})
+							switch callType {
+							case "function":
 								// Create function_call as top-level object
 								funcCall := []byte(`{}`)
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
-								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
+								funcCall, _ = sjson.SetBytes(funcCall, "call_id", callID)
 								{
 									name := tc.Get("function.name").String()
 									if short, ok := originalToolNameMap[name]; ok {
@@ -227,6 +290,19 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								}
 								funcCall, _ = sjson.SetBytes(funcCall, "arguments", tc.Get("function.arguments").String())
 								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
+							case "custom":
+								customCall := []byte(`{}`)
+								customCall, _ = sjson.SetBytes(customCall, "type", "custom_tool_call")
+								customCall, _ = sjson.SetBytes(customCall, "call_id", callID)
+								name := tc.Get("custom.name").String()
+								if short, ok := originalToolNameMap[name]; ok {
+									name = short
+								} else {
+									name = shortenNameIfNeeded(name)
+								}
+								customCall, _ = sjson.SetBytes(customCall, "name", name)
+								customCall, _ = sjson.SetBytes(customCall, "input", tc.Get("custom.input").String())
+								out, _ = sjson.SetRawBytes(out, "input.-1", customCall)
 							}
 						}
 					}
