@@ -57,6 +57,19 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		pendingReasoningContent := ""
+		takePendingReasoning := func() string {
+			reasoning := pendingReasoningContent
+			pendingReasoningContent = ""
+			return reasoning
+		}
+		appendPendingReasoningMessage := func() {
+			if reasoning := takePendingReasoning(); reasoning != "" {
+				message := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
+				message, _ = sjson.SetBytes(message, "reasoning_content", reasoning)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+			}
+		}
 		input.ForEach(func(_, item gjson.Result) bool {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
@@ -69,6 +82,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				role := item.Get("role").String()
 				if role == "developer" {
 					role = "user"
+				}
+				if role != "assistant" {
+					appendPendingReasoningMessage()
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
@@ -108,8 +124,22 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				} else if content.Type == gjson.String {
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
+				if role == "assistant" {
+					reasoning := item.Get("reasoning_content").String()
+					if reasoning == "" {
+						reasoning = takePendingReasoning()
+					} else {
+						pendingReasoningContent = ""
+					}
+					if reasoning != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", reasoning)
+					}
+				}
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+
+			case "reasoning":
+				pendingReasoningContent += collectOpenAIResponsesReasoningContent(item)
 
 			case "function_call":
 				// Handle function call conversion to assistant message with tool_calls
@@ -130,6 +160,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
+				if reasoning := takePendingReasoning(); reasoning != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoning)
+				}
 				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 
 			case "function_call_output":
@@ -155,6 +188,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
+				if reasoning := takePendingReasoning(); reasoning != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoning)
+				}
 				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 
 			case "custom_tool_call_output":
@@ -166,6 +202,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			return true
 		})
+		appendPendingReasoningMessage()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -213,4 +250,17 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
+	var reasoningText strings.Builder
+	for _, summaryItem := range item.Get("summary").Array() {
+		if summaryItem.Get("type").String() == "summary_text" {
+			reasoningText.WriteString(summaryItem.Get("text").String())
+		}
+	}
+	if reasoningText.Len() == 0 {
+		return "[reasoning unavailable]"
+	}
+	return reasoningText.String()
 }

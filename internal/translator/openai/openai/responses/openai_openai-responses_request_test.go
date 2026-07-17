@@ -32,6 +32,32 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsFlattensNamespaceTo
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplaysReasoningWithVisibleText(t *testing.T) {
+	raw := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"visible"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+	message := gjson.GetBytes(out, "messages.0")
+	if got := message.Get("reasoning_content").String(); got != "think" {
+		t.Fatalf("reasoning_content = %q, want think; output=%s", got, out)
+	}
+	if got := message.Get("content.0.text").String(); got != "visible" {
+		t.Fatalf("visible content = %q, want visible; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsAttachesReasoningToToolCall(t *testing.T) {
+	raw := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"use tool"}]},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "use tool" {
+		t.Fatalf("tool reasoning_content = %q, want use tool; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.0.function.name").String(); got != "lookup" {
+		t.Fatalf("tool name = %q, want lookup; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_1" {
+		t.Fatalf("tool output id = %q, want call_1; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesStructuredToolChoice(t *testing.T) {
 	raw := []byte(`{"input":[{"role":"user","content":"Run command."}],"tool_choice":{"type":"function","function":{"name":"run_command"}}}`)
 	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
