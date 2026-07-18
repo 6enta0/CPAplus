@@ -403,6 +403,59 @@ func ParseGeminiCLIUsage(data []byte) usage.Detail {
 	return parseGeminiFamilyUsageDetail(node)
 }
 
+func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
+	detail := usage.Detail{
+		InputTokens:     firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		OutputTokens:    firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
+		ReasoningTokens: firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
+		TotalTokens:     firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
+		CachedTokens:    firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	}
+	return detail
+}
+
+// ParseInteractionsUsage extracts token usage from native Interactions response shapes.
+func ParseInteractionsUsage(data []byte) usage.Detail {
+	root := gjson.ParseBytes(data)
+	node := firstExistingUsageNode(root,
+		"usage",
+		"total_usage",
+		"metadata.total_usage",
+		"metadata.usage",
+		"usageMetadata",
+		"usage_metadata",
+		"interaction.usage",
+		"interaction.total_usage",
+		"interaction.metadata.total_usage",
+	)
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	if hasGeminiFamilyUsageTokenFields(node) {
+		return parseGeminiFamilyUsageDetail(node)
+	}
+	return parseInteractionsUsageDetail(node)
+}
+
+// ParseInteractionsStreamUsage extracts usage from one Interactions stream event.
+func ParseInteractionsStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		payload = line
+	}
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	detail := ParseInteractionsUsage(payload)
+	if !hasNonZeroTokenUsage(detail) {
+		return usage.Detail{}, false
+	}
+	return detail, true
+}
+
 func ParseGeminiUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
 	node := usageNode.Get("usageMetadata")

@@ -154,6 +154,69 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_InteractionsKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			InteractionsKey: []config.GeminiKey{{
+				APIKey:   "interactions-key",
+				BaseURL:  "https://interactions.example.com",
+				ProxyURL: "http://proxy.local:8080",
+				Prefix:   "native",
+				Headers:  map[string]string{"X-Custom": "value"},
+			}},
+		},
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "gemini-interactions" || auth.Label != "interactions-apikey" {
+		t.Fatalf("auth identity = %q/%q, want gemini-interactions/interactions-apikey", auth.Provider, auth.Label)
+	}
+	if auth.Prefix != "native" || auth.ProxyURL != "http://proxy.local:8080" {
+		t.Fatalf("routing metadata = prefix %q proxy %q", auth.Prefix, auth.ProxyURL)
+	}
+	if got := auth.Attributes["api_key"]; got != "interactions-key" {
+		t.Fatalf("api_key = %q, want interactions-key", got)
+	}
+	if got := auth.Attributes["base_url"]; got != "https://interactions.example.com" {
+		t.Fatalf("base_url = %q, want https://interactions.example.com", got)
+	}
+	if got := auth.Attributes["header:X-Custom"]; got != "value" {
+		t.Fatalf("header:X-Custom = %q, want value", got)
+	}
+}
+
+func TestConfigSynthesizerInteractionsIdentitySurvivesMutableUpdates(t *testing.T) {
+	synthesize := func(entry config.GeminiKey) *coreauth.Auth {
+		auths, errSynthesize := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+			Config:      &config.Config{InteractionsKey: []config.GeminiKey{entry}},
+			Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+			IDGenerator: NewStableIDGenerator(),
+		})
+		if errSynthesize != nil || len(auths) != 1 {
+			t.Fatalf("Synthesize() = %d auths, error %v", len(auths), errSynthesize)
+		}
+		return auths[0]
+	}
+	before := synthesize(config.GeminiKey{APIKey: "same-key", BaseURL: "https://example.com", Prefix: "one"})
+	after := synthesize(config.GeminiKey{APIKey: "same-key", BaseURL: "https://example.com", Prefix: "two", ProxyURL: "direct"})
+	if before.ID != after.ID {
+		t.Fatalf("auth ID changed across mutable update: %q -> %q", before.ID, after.ID)
+	}
+	if after.Prefix != "two" || after.ProxyURL != "direct" {
+		t.Fatalf("updated routing fields not synthesized: %+v", after)
+	}
+}
+
 func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

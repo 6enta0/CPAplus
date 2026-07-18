@@ -108,6 +108,13 @@ func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	}
 }
 
+func TestBuildConfigChangeDetails_InteractionsKeys(t *testing.T) {
+	oldCfg := &config.Config{InteractionsKey: []config.GeminiKey{{APIKey: "key", BaseURL: "https://old.example"}}}
+	newCfg := &config.Config{InteractionsKey: []config.GeminiKey{{APIKey: "key", BaseURL: "https://new.example"}}}
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "interactions[0].base-url: https://old.example -> https://new.example")
+}
+
 func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{

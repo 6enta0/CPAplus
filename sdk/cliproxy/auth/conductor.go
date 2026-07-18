@@ -895,7 +895,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -915,6 +915,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		if executionModel != "" {
+			execReq.Model = executionModel
+		}
 		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, opts)
 		if errStream != nil {
 			attemptCancel()
@@ -1033,6 +1036,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		switch provider {
 		case "gemini":
 			if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "gemini-interactions":
+			if entry := resolveInteractionsAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		case "claude":
@@ -1268,13 +1275,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1303,13 +1311,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1334,13 +1343,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1367,7 +1377,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
@@ -1388,7 +1399,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1418,6 +1429,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if restoreExecutionModel {
+				execReq.Model = executionModel
+			}
 			resp, errExec := executor.Execute(attemptCtx, auth, execReq, opts)
 			cancel()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
@@ -1455,7 +1469,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
@@ -1476,7 +1491,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1497,6 +1512,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if restoreExecutionModel {
+				execReq.Model = executionModel
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
@@ -1531,7 +1549,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
@@ -1552,7 +1571,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1567,7 +1586,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		attempted[auth.ID] = struct{}{}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
+		streamExecutionModel := ""
+		if restoreExecutionModel {
+			streamExecutionModel = executionModel
+		}
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, streamExecutionModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1613,6 +1636,39 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
 	opts.Metadata = meta
 	return opts
+}
+
+func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	if len(opts.Metadata) == 0 {
+		return fallback
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]
+	if !ok || raw == nil {
+		return fallback
+	}
+	switch value := raw.(type) {
+	case string:
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	case []byte:
+		if strings.TrimSpace(string(value)) != "" {
+			return strings.TrimSpace(string(value))
+		}
+	}
+	return fallback
+}
+
+func executionModelForAuthSelection(opts cliproxyexecutor.Options, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", false
+	}
+	if authSelectionModelFromOptions(opts, model) == model {
+		return "", false
+	}
+	return model, true
 }
 
 func hasRequestedModelMetadata(meta map[string]any) bool {
@@ -1774,6 +1830,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	switch provider {
 	case "gemini":
 		upstreamModel = resolveUpstreamModelForGeminiAPIKey(cfg, auth, requestedModel)
+	case "gemini-interactions":
+		upstreamModel = resolveUpstreamModelForInteractionsAPIKey(cfg, auth, requestedModel)
 	case "claude":
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
 	case "codex":
@@ -1843,6 +1901,13 @@ func resolveGeminiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.GeminiKey, auth)
 }
 
+func resolveInteractionsAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.GeminiKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.InteractionsKey, auth)
+}
+
 func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.ClaudeKey {
 	if cfg == nil {
 		return nil
@@ -1866,6 +1931,14 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForInteractionsAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveInteractionsAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
@@ -3578,7 +3651,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, len(models) > 1)
 		if errStream != nil {
 			continue
 		}

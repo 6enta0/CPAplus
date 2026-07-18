@@ -409,6 +409,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	case "gemini-interactions":
+		s.coreManager.RegisterExecutor(executor.NewGeminiInteractionsExecutor(s.cfg))
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
 	case "gemini-cli":
@@ -867,6 +869,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "gemini-interactions":
+		models = registry.GetGeminiModels()
+		if entry := s.resolveConfigInteractionsKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
@@ -1115,6 +1128,20 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 }
 
 func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.GeminiKey)
+}
+
+func (s *Service) resolveConfigInteractionsKey(auth *coreauth.Auth) *config.GeminiKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return s.resolveConfigGeminiKeyEntry(auth, s.cfg.InteractionsKey)
+}
+
+func (s *Service) resolveConfigGeminiKeyEntry(auth *coreauth.Auth, entries []config.GeminiKey) *config.GeminiKey {
 	if auth == nil || s.cfg == nil {
 		return nil
 	}
@@ -1123,8 +1150,8 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
