@@ -2064,5 +2064,132 @@
         ]
       }
     }
+  ],
+  "xai": [
+    {
+      "id": "grok-build-0.1",
+      "object": "model",
+      "created": 1779321600,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Build 0.1",
+      "name": "grok-build-0.1",
+      "description": "Grok Build 0.1 is xAI's fast coding model trained specifically for agentic software engineering workflows.",
+      "context_length": 256000,
+      "max_completion_tokens": 256000
+    },
+    {
+      "id": "grok-4.5",
+      "object": "model",
+      "created": 1783526400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.5",
+      "name": "grok-4.5",
+      "description": "xAI's intelligent coding model for agentic software, engineering, and workflow tasks.",
+      "context_length": 500000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": ["low", "medium", "high"]
+      }
+    },
+    {
+      "id": "grok-4.3",
+      "object": "model",
+      "created": 1775606400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.3",
+      "name": "grok-4.3",
+      "description": "xAI Grok 4.3 model for the Responses API.",
+      "context_length": 1000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": ["none", "low", "medium", "high"]
+      }
+    },
+    {
+      "id": "grok-4.20-0309-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Reasoning",
+      "name": "grok-4.20-0309-reasoning",
+      "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-0309-non-reasoning",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 0309 Non Reasoning",
+      "name": "grok-4.20-0309-non-reasoning",
+      "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "grok-4.20-multi-agent-0309",
+      "object": "model",
+      "created": 1773014400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.20 Multi Agent 0309",
+      "name": "grok-4.20-multi-agent-0309",
+      "description": "xAI Grok 4.20 multi-agent model for the Responses API.",
+      "context_length": 2000000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": ["low", "medium", "high"]
+      }
+    },
+    {
+      "id": "grok-3-mini",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini",
+      "name": "grok-3-mini",
+      "description": "xAI Grok 3 Mini model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": ["low", "medium", "high"]
+      }
+    },
+    {
+      "id": "grok-3-mini-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 3 Mini Fast",
+      "name": "grok-3-mini-fast",
+      "description": "xAI Grok 3 Mini Fast model for the Responses API.",
+      "context_length": 131072,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": ["low", "medium", "high"]
+      }
+    },
+    {
+      "id": "grok-composer-2.5-fast",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Composer 2.5 Fast",
+      "name": "grok-composer-2.5-fast",
+      "description": "xAI Composer 2.5 Fast model for the Responses API.",
+      "context_length": 200000,
+      "max_completion_tokens": 32768
+    }
   ]
 }

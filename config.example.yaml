@@ -211,6 +211,22 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# Native xAI API keys
+# xai-api-key:
+#   - api-key: "xai-..."
+#     priority: 1 # optional: higher values are selected first
+#     prefix: "grok" # optional: require calls like "grok/grok-4.5"
+#     base-url: "https://api.x.ai/v1"
+#     websockets: false # optional: reserved for the native xAI websocket executor
+#     proxy-url: "socks5://proxy.example.com:1080"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     models:
+#       - name: "grok-4.5"
+#         alias: "grok-latest"
+#     excluded-models:
+#       - "grok-3-*"
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
@@ -349,8 +365,8 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
 # you select the protocol surface, but inference backend selection can still follow the resolved
@@ -379,6 +395,9 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
+#   xai:
+#     - name: "grok-4.5"
+#       alias: "grok-latest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:

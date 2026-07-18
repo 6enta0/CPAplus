@@ -16,6 +16,9 @@ const (
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 
+	// XAI represents the native xAI Grok provider identifier.
+	XAI = "xai"
+
 	// Claude represents the Anthropic Claude provider identifier.
 	Claude = "claude"
 

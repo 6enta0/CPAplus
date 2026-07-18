@@ -99,6 +99,10 @@ type Auth struct {
 	indexAssigned  bool              `json:"-"`
 }
 
+// AttributeAuthIndexSeed overrides the derived auth-index seed when a provider
+// has an explicit stable credential identity.
+const AttributeAuthIndexSeed = "auth_index_seed"
+
 const (
 	recentRequestBucketSeconds int64 = 10 * 60
 	recentRequestBucketCount         = 20
@@ -258,6 +262,11 @@ func stableAuthIndex(seed string) string {
 func (a *Auth) indexSeed() string {
 	if a == nil {
 		return ""
+	}
+	if a.Attributes != nil {
+		if seed := strings.TrimSpace(a.Attributes[AttributeAuthIndexSeed]); seed != "" {
+			return AttributeAuthIndexSeed + ":" + seed
+		}
 	}
 
 	if fileName := strings.TrimSpace(a.FileName); fileName != "" {

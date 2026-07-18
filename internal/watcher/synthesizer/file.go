@@ -159,6 +159,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	if provider == "xai" {
+		if baseURL, ok := metadata["base_url"].(string); ok {
+			if trimmed := strings.TrimSpace(baseURL); trimmed != "" {
+				a.Attributes["base_url"] = trimmed
+			}
+		}
+	}
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
