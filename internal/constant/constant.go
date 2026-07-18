@@ -7,6 +7,9 @@ const (
 	// Gemini represents the Google Gemini provider identifier.
 	Gemini = "gemini"
 
+	// GeminiInteractions identifies the native Google Interactions provider.
+	GeminiInteractions = "gemini-interactions"
+
 	// GeminiCLI represents the Google Gemini CLI provider identifier.
 	GeminiCLI = "gemini-cli"
 
@@ -24,4 +27,7 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Interactions identifies the Google Interactions protocol.
+	Interactions = "interactions"
 )
