@@ -486,12 +486,13 @@ func convertResponsesContentPartToClaude(part gjson.Result) []byte {
 		data := fileData
 		if strings.HasPrefix(fileData, "data:") {
 			mediaAndData := strings.SplitN(strings.TrimPrefix(fileData, "data:"), ";base64,", 2)
-			if len(mediaAndData) == 2 {
-				if mediaAndData[0] != "" {
-					mediaType = mediaAndData[0]
-				}
-				data = mediaAndData[1]
+			if len(mediaAndData) != 2 || mediaAndData[1] == "" {
+				return nil
 			}
+			if mediaAndData[0] != "" {
+				mediaType = mediaAndData[0]
+			}
+			data = mediaAndData[1]
 		}
 		contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)

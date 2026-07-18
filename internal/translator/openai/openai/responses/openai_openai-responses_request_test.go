@@ -69,6 +69,23 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesStructured
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesInputImageMetadata(t *testing.T) {
+	raw := []byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/image.png","detail":"high"},{"type":"input_image","file_id":"file-image-123","detail":"low"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-test", raw, false)
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "https://example.com/image.png" {
+		t.Fatalf("image URL = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.detail").String(); got != "high" {
+		t.Fatalf("URL image detail = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.image_url.file_id").String(); got != "file-image-123" {
+		t.Fatalf("image file ID = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.image_url.detail").String(); got != "low" {
+		t.Fatalf("file image detail = %q", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMergesAdditionalCustomTools(t *testing.T) {
 	raw := []byte(`{
 		"tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],

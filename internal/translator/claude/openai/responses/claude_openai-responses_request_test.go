@@ -66,6 +66,22 @@ func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputPreservesInputI
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaudeSkipsInvalidToolResultFileDataURL(t *testing.T) {
+	raw := []byte(`{"input":[{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"fallback"},{"type":"input_file","file_data":"data:application/pdf,not-base64"}]}]}`)
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	content := gjson.GetBytes(out, "messages.1.content.0.content")
+	if content.IsArray() {
+		parts := content.Array()
+		if len(parts) != 1 || parts[0].Get("type").String() != "text" || parts[0].Get("text").String() != "fallback" {
+			t.Fatalf("unexpected tool result content: %s", content.Raw)
+		}
+		return
+	}
+	if content.String() != "fallback" {
+		t.Fatalf("tool result content = %s", content.Raw)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_PreservesCacheControl(t *testing.T) {
 	raw := []byte(`{
 		"input":[{

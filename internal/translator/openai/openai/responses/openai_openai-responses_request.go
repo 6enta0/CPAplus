@@ -107,8 +107,19 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
-							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+							fileID := contentItem.Get("file_id").String()
+							if imageURL == "" && fileID == "" {
+								return true
+							}
+							contentPart := []byte(`{"type":"image_url","image_url":{}}`)
+							if imageURL != "" {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+							} else {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.file_id", fileID)
+							}
+							if detail := contentItem.Get("detail"); detail.Exists() {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
 						return true

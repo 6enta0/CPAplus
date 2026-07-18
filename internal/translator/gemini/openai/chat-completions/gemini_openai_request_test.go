@@ -66,3 +66,24 @@ func TestConvertOpenAIRequestToGemini_KeepsTrailingUserTurn(t *testing.T) {
 		t.Fatalf("trailing user turn was removed: %s", out)
 	}
 }
+
+func TestConvertOpenAIRequestToGeminiPreservesAudioAndVideo(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"SUQzBA==","format":"mp3"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,AAAAIGZ0eXA="}},{"type":"video_url","video_url":{"url":"data:video/mp4,invalid"}}]}]}`)
+	out := ConvertOpenAIRequestToGemini("gemini-test", input, false)
+	parts := gjson.GetBytes(out, "contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts length = %d, want 2: %s", len(parts), out)
+	}
+	if got := parts[0].Get("inlineData.mime_type").String(); got != "audio/mpeg" {
+		t.Fatalf("audio MIME = %q", got)
+	}
+	if got := parts[0].Get("inlineData.data").String(); got != "SUQzBA==" {
+		t.Fatalf("audio data = %q", got)
+	}
+	if got := parts[1].Get("inlineData.mime_type").String(); got != "video/mp4" {
+		t.Fatalf("video MIME = %q", got)
+	}
+	if got := parts[1].Get("inlineData.data").String(); got != "AAAAIGZ0eXA=" {
+		t.Fatalf("video data = %q", got)
+	}
+}
