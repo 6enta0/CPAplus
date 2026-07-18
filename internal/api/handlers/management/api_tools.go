@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -262,8 +263,44 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if provider == "xai" {
+		token, errToken := h.refreshXAIOAuthAccessToken(ctx, auth)
+		return token, errToken
+	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func (h *Handler) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	current := strings.TrimSpace(tokenValueForAuth(auth))
+	if current != "" {
+		if expiry, hasExpiry := auth.ExpirationTime(); !hasExpiry || expiry.After(time.Now().Add(30*time.Second)) {
+			return current, nil
+		}
+	}
+	updated, errRefresh := sdkAuth.RefreshXAIAuth(ctx, h.cfg, auth)
+	if errRefresh != nil {
+		return "", errRefresh
+	}
+	if updated == nil {
+		return current, nil
+	}
+	now := time.Now()
+	updated.LastRefreshedAt = now
+	updated.UpdatedAt = now
+	if h != nil && h.authManager != nil {
+		if _, errUpdate := h.authManager.Update(ctx, updated); errUpdate != nil {
+			return "", errUpdate
+		}
+	}
+	auth.Metadata = updated.Metadata
+	auth.Attributes = updated.Attributes
+	auth.LastRefreshedAt = updated.LastRefreshedAt
+	auth.UpdatedAt = updated.UpdatedAt
+	return strings.TrimSpace(tokenValueForAuth(updated)), nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
@@ -743,6 +780,10 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 		}
 	case "codex":
 		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "xai":
+		if entry := resolveAPIKeyConfig(cfg.XAIKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
 	}

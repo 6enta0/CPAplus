@@ -120,6 +120,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// XAIKey defines native xAI API key configurations using the Codex key shape.
+	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -146,10 +149,10 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
+	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
+	// gemini-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
@@ -494,6 +497,12 @@ type CodexModel struct {
 
 func (m CodexModel) GetName() string  { return m.Name }
 func (m CodexModel) GetAlias() string { return m.Alias }
+
+// XAIKey uses the Codex API key structure for native xAI registration.
+type XAIKey = CodexKey
+
+// XAIModel uses the Codex model mapping structure for xAI models.
+type XAIModel = CodexModel
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
@@ -863,6 +872,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
+	// Sanitize xAI keys using the same rules as Codex API keys.
+	cfg.SanitizeXAIKeys()
+
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
@@ -1053,12 +1065,27 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
 // It trims whitespace and preserves order for remaining entries.
 func (cfg *Config) SanitizeCodexKeys() {
-	if cfg == nil || len(cfg.CodexKey) == 0 {
+	if cfg == nil {
 		return
 	}
-	out := make([]CodexKey, 0, len(cfg.CodexKey))
-	for i := range cfg.CodexKey {
-		e := cfg.CodexKey[i]
+	cfg.CodexKey = sanitizeCodexKeyEntries(cfg.CodexKey)
+}
+
+// SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
+func (cfg *Config) SanitizeXAIKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+}
+
+func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]CodexKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
@@ -1068,7 +1095,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		}
 		out = append(out, e)
 	}
-	cfg.CodexKey = out
+	return out
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

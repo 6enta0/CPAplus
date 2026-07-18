@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	oauthSessionTTL     = 10 * time.Minute
+	oauthSessionTTL     = 30 * time.Minute
 	maxOAuthStateLength = 128
 )
 
@@ -227,6 +227,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "gemini", nil
 	case "antigravity", "anti-gravity":
 		return "antigravity", nil
+	case "xai", "x-ai", "x.ai", "grok":
+		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}

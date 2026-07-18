@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -1140,6 +1141,24 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	if isConfigAPIKeyAuth(targetAuth) {
+		h.mu.Lock()
+		handled, errToggle := toggleConfigAPIKeyExcludedAll(h.cfg, targetAuth, *req.Disabled)
+		if errToggle != nil {
+			h.mu.Unlock()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update config api key: %v", errToggle)})
+			return
+		}
+		if !handled {
+			h.mu.Unlock()
+			c.JSON(http.StatusNotFound, gin.H{"error": "config api key entry not found"})
+			return
+		}
+		h.persistLocked(c)
+		h.mu.Unlock()
+		return
+	}
+
 	// Update disabled state
 	targetAuth.Disabled = *req.Disabled
 	if *req.Disabled {
@@ -2217,6 +2236,104 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestXAIToken(c *gin.Context) {
+	ctx := PopulateAuthContext(context.Background(), c)
+	fmt.Println("Initializing xAI authentication...")
+
+	state := fmt.Sprintf("xai-%d", time.Now().UnixNano())
+	authService := xaiauth.NewXAIAuth(h.cfg)
+	deviceFlow, errDevice := authService.StartDeviceFlow(ctx)
+	if errDevice != nil {
+		log.Errorf("Failed to start xAI device flow: %v", errDevice)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
+		return
+	}
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
+	}
+	RegisterOAuthSession(state, "xai")
+
+	go func() {
+		fmt.Println("Waiting for xAI authentication...")
+		bundle, errWait := authService.WaitForAuthorization(ctx, deviceFlow)
+		if errWait != nil {
+			if IsOAuthSessionPending(state, "xai") {
+				log.Errorf("xAI authentication failed: %v", errWait)
+				SetOAuthSessionError(state, "Authentication failed")
+			}
+			return
+		}
+		if !IsOAuthSessionPending(state, "xai") {
+			return
+		}
+		tokenStorage := authService.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+		fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
+		label := strings.TrimSpace(tokenStorage.Email)
+		if label == "" {
+			label = "xAI"
+		}
+		metadata := map[string]any{
+			"type":           "xai",
+			"access_token":   tokenStorage.AccessToken,
+			"refresh_token":  tokenStorage.RefreshToken,
+			"id_token":       tokenStorage.IDToken,
+			"token_type":     tokenStorage.TokenType,
+			"expires_in":     tokenStorage.ExpiresIn,
+			"expired":        tokenStorage.Expire,
+			"last_refresh":   tokenStorage.LastRefresh,
+			"base_url":       tokenStorage.BaseURL,
+			"token_endpoint": tokenStorage.TokenEndpoint,
+			"auth_kind":      "oauth",
+		}
+		if tokenStorage.Email != "" {
+			metadata["email"] = tokenStorage.Email
+		}
+		if tokenStorage.Subject != "" {
+			metadata["sub"] = tokenStorage.Subject
+		}
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "xai",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  tokenStorage.BaseURL,
+			},
+		}
+		if !IsOAuthSessionPending(state, "xai") {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save xAI token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+		CompleteOAuthSession(state)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use xAI services through this CLI")
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	} else {
+		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 type projectSelectionRequiredError struct{}

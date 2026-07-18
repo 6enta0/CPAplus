@@ -2,8 +2,11 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -26,6 +29,42 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	}
 	if httpTransport.Proxy != nil {
 		t.Fatal("expected direct transport to disable proxy function")
+	}
+}
+
+func TestResolveTokenForXAIOAuthRefreshesExpiredToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "new-access", "expires_in": 3600,
+		})
+	}))
+	defer server.Close()
+	auth := &coreauth.Auth{
+		ID: "xai-user.json", Provider: "xai",
+		Metadata: map[string]any{
+			"access_token": "old-access", "refresh_token": "refresh",
+			"token_endpoint": server.URL, "expired": time.Now().Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	handler := &Handler{cfg: &config.Config{}, authManager: manager}
+	token, errResolve := handler.resolveTokenForAuth(context.Background(), auth)
+	if errResolve != nil {
+		t.Fatalf("resolveTokenForAuth() error = %v", errResolve)
+	}
+	if token != "new-access" {
+		t.Fatalf("token = %q, want new-access", token)
+	}
+	if auth.Metadata["refresh_token"] != "refresh" || auth.Metadata["last_refresh"] == "" {
+		t.Fatalf("updated xAI metadata = %#v", auth.Metadata)
+	}
+	persisted, ok := manager.GetByID(auth.ID)
+	if !ok || persisted.Metadata["access_token"] != "new-access" {
+		t.Fatalf("persisted xAI auth = %#v, found = %t", persisted, ok)
 	}
 }
 
@@ -76,6 +115,10 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				APIKey:   "codex-key",
 				ProxyURL: "http://codex-proxy.example.com:8080",
 			}},
+			XAIKey: []config.XAIKey{{
+				APIKey:   "xai-key",
+				ProxyURL: "http://xai-proxy.example.com:8080",
+			}},
 			OpenAICompatibility: []config.OpenAICompatibility{{
 				Name:    "bohe",
 				BaseURL: "https://bohe.example.com",
@@ -115,6 +158,14 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				Attributes: map[string]string{"api_key": "codex-key"},
 			},
 			wantProxy: "http://codex-proxy.example.com:8080",
+		},
+		{
+			name: "xai",
+			auth: &coreauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"api_key": "xai-key"},
+			},
+			wantProxy: "http://xai-proxy.example.com:8080",
 		},
 		{
 			name: "openai-compatibility",
