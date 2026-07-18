@@ -29,6 +29,14 @@ func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *test
 	}
 }
 
+func TestConvertCodexResponseToOpenAINonStreamMapsCacheWriteTokens(t *testing.T) {
+	raw := []byte(`{"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}`)
+	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 4 {
+		t.Fatalf("cached_creation_tokens = %d, want 4; output=%s", got, out)
+	}
+}
+
 func TestConvertCodexResponseToOpenAINonStreamIncompleteMaxTokens(t *testing.T) {
 	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}`)
 	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
