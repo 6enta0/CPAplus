@@ -90,6 +90,26 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	assertNonSchemaRequestPreserved(t, body)
 }
 
+func TestAntigravityBuildRequestPreservesNativeWebSearchRoute(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-search-test", []byte(`{"requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":"search"}]}],"tools":[{"googleSearch":{}}]}}`))
+	if got := body["model"]; got != "gemini-search-test" {
+		t.Fatalf("model = %v, want route model", got)
+	}
+	if got := body["requestType"]; got != "web_search" {
+		t.Fatalf("requestType = %v, want web_search", got)
+	}
+	if _, ok := body["requestId"]; ok {
+		t.Fatal("native web search should not receive requestId")
+	}
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatal("request missing")
+	}
+	if _, ok := request["sessionId"]; ok {
+		t.Fatal("native web search should not receive sessionId")
+	}
+}
+
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
 	t.Helper()
 

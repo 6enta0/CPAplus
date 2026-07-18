@@ -7,9 +7,43 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func TestConvertClaudeRequestToAntigravityMapsNativeWebSearch(t *testing.T) {
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient("test-native-web-search", "antigravity", []*registry.ModelInfo{{ID: "gemini-search-test", SupportsWebSearch: true}})
+	t.Cleanup(func() { registryRef.UnregisterClient("test-native-web-search") })
+
+	input := []byte(`{"model":"gemini-search-test","messages":[{"role":"user","content":"latest weather"}],"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8,"allowed_domains":["weather.example"]}]}`)
+	out := ConvertClaudeRequestToAntigravity("gemini-search-test", input, true)
+	if got := gjson.GetBytes(out, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int(); got != 8 {
+		t.Fatalf("maxResultCount = %d, want 8", got)
+	}
+	if got := gjson.GetBytes(out, "request.tools.0.googleSearch.includedDomains.0").String(); got != "weather.example" {
+		t.Fatalf("included domain = %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityKeepsFallbackForMixedTools(t *testing.T) {
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient("test-native-web-search-mixed", "antigravity", []*registry.ModelInfo{{ID: "gemini-search-mixed", SupportsWebSearch: true}})
+	t.Cleanup(func() { registryRef.UnregisterClient("test-native-web-search-mixed") })
+
+	input := []byte(`{"model":"gemini-search-mixed","messages":[{"role":"user","content":"search"}],"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+	out := ConvertClaudeRequestToAntigravity("gemini-search-mixed", input, true)
+	if got := gjson.GetBytes(out, "requestType").String(); got == "web_search" {
+		t.Fatalf("mixed tools unexpectedly selected native web search: %s", out)
+	}
+	if got := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String(); got != "lookup" {
+		t.Fatalf("fallback function declaration = %q", got)
+	}
+}
 
 func testAnthropicNativeSignature(t *testing.T) string {
 	t.Helper()
