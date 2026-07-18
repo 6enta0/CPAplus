@@ -31,6 +31,13 @@ import (
 
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/gemini"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/interactions"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/chat-completions"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/responses"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/interactions"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/interactions"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/interactions"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/interactions/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/interactions/chat-completions"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/interactions/responses"
 )
