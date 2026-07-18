@@ -179,6 +179,20 @@ nonstream-keepalive-interval: 0
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
+# Native Google Interactions API keys
+# interactions-api-key:
+#   - api-key: "AIzaSy...01"
+#     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview"
+#     base-url: "https://generativelanguage.googleapis.com"
+#     proxy-url: "socks5://proxy.example.com:1080"
+#     headers:
+#       Api-Revision: "2026-05-20" # optional: overrides the default Interactions revision
+#     models:
+#       - name: "gemini-3-pro-preview"
+#         alias: "gemini-pro"
+#     excluded-models:
+#       - "gemini-2.5-*"
+
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
@@ -336,7 +350,7 @@ nonstream-keepalive-interval: 0
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
-# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
 # you select the protocol surface, but inference backend selection can still follow the resolved

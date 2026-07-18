@@ -85,6 +85,23 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestInteractionsRouteIsRegistered(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	server.engine.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "exactly one of model or agent") {
+		t.Fatalf("body = %s, want Interactions validation error", recorder.Body.String())
+	}
+}
+
 func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 

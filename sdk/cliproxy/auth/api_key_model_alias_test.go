@@ -66,6 +66,19 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 	}
 }
 
+func TestLookupAPIKeyUpstreamModelInteractionsKey(t *testing.T) {
+	cfg := &internalconfig.Config{InteractionsKey: []internalconfig.GeminiKey{{
+		APIKey: "interactions-key",
+		Models: []internalconfig.GeminiModel{{Name: "gemini-3-pro-preview", Alias: "native-pro"}},
+	}}}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	_, _ = mgr.Register(context.Background(), &Auth{ID: "interactions-auth", Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key"}})
+	if got := mgr.lookupAPIKeyUpstreamModel("interactions-auth", "native-pro(high)"); got != "gemini-3-pro-preview(high)" {
+		t.Fatalf("Interactions alias = %q, want gemini-3-pro-preview(high)", got)
+	}
+}
+
 func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{

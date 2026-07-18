@@ -106,6 +106,23 @@ func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
 	}
 }
 
+func TestParseInteractionsUsage(t *testing.T) {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"total_tokens":12,"cached_tokens":2}}`))
+	if detail.InputTokens != 3 || detail.OutputTokens != 4 || detail.ReasoningTokens != 5 || detail.TotalTokens != 12 || detail.CachedTokens != 2 {
+		t.Fatalf("unexpected Interactions usage: %+v", detail)
+	}
+}
+
+func TestParseInteractionsStreamUsageOfficialMetadata(t *testing.T) {
+	detail, ok := ParseInteractionsStreamUsage([]byte(`data: {"event_type":"finish","metadata":{"total_usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_cached_tokens":1,"total_tokens":11}}}`))
+	if !ok {
+		t.Fatal("ParseInteractionsStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 2 || detail.OutputTokens != 6 || detail.ReasoningTokens != 3 || detail.CachedTokens != 1 || detail.TotalTokens != 11 {
+		t.Fatalf("unexpected Interactions stream usage: %+v", detail)
+	}
+}
+
 func TestParseGeminiCLIStreamUsage_ResponseSnakeCaseUsageMetadata(t *testing.T) {
 	line := []byte(`data: {"response":{"usage_metadata":{"promptTokenCount":13,"candidatesTokenCount":2,"totalTokenCount":15}}}`)
 	detail, ok := ParseGeminiCLIStreamUsage(line)

@@ -564,6 +564,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
 		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
+		mgmt.GET("/interactions-api-key", s.mgmt.GetInteractionsKeys)
+		mgmt.PUT("/interactions-api-key", s.mgmt.PutInteractionsKeys)
+		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
+		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
 
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
@@ -1123,6 +1127,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 	authEntries := util.CountAuthFiles(context.Background(), tokenStore)
 	geminiAPIKeyCount := len(cfg.GeminiKey)
+	interactionsAPIKeyCount := len(cfg.InteractionsKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
@@ -1135,11 +1140,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
+		interactionsAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		vertexAICompatCount,

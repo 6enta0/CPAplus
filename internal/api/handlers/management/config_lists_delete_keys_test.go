@@ -81,6 +81,29 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	}
 }
 
+func TestDeleteInteractionsKeyDeletesOnlyMatchingBaseURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{
+		cfg: &config.Config{InteractionsKey: []config.GeminiKey{
+			{APIKey: "shared-key", BaseURL: "https://a.example.com"},
+			{APIKey: "shared-key", BaseURL: "https://b.example.com"},
+		}},
+		configFilePath: writeTestConfigFile(t),
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/interactions-api-key?api-key=shared-key&base-url=https://a.example.com", nil)
+
+	h.DeleteInteractionsKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(h.cfg.InteractionsKey) != 1 || h.cfg.InteractionsKey[0].BaseURL != "https://b.example.com" {
+		t.Fatalf("remaining Interactions keys = %+v", h.cfg.InteractionsKey)
+	}
+}
+
 func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)

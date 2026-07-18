@@ -538,8 +538,15 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	return h.executeWithAuthManagerResolved(ctx, handlerType, modelName, normalizedModel, providers, rawJSON, alt, "")
+}
+
+func (h *BaseAPIHandler) executeWithAuthManagerResolved(ctx context.Context, handlerType, requestedModel, normalizedModel string, providers []string, rawJSON []byte, alt, authSelectionModel string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = requestedModel
+	if strings.TrimSpace(authSelectionModel) != "" {
+		reqMeta[coreexecutor.AuthSelectionModelMetadataKey] = strings.TrimSpace(authSelectionModel)
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -638,8 +645,15 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
+	return h.executeStreamWithAuthManagerResolved(ctx, handlerType, modelName, normalizedModel, providers, rawJSON, alt, "")
+}
+
+func (h *BaseAPIHandler) executeStreamWithAuthManagerResolved(ctx context.Context, handlerType, requestedModel, normalizedModel string, providers []string, rawJSON []byte, alt, authSelectionModel string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = requestedModel
+	if strings.TrimSpace(authSelectionModel) != "" {
+		reqMeta[coreexecutor.AuthSelectionModelMetadataKey] = strings.TrimSpace(authSelectionModel)
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -883,6 +897,7 @@ func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (provi
 	if strings.EqualFold(strings.TrimSpace(handlerType), "openai-image") && strings.EqualFold(baseModel, "gpt-image-2") {
 		providers = preferNonCodexProviders(providers)
 	}
+	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
@@ -908,6 +923,55 @@ func preferNonCodexProviders(providers []string) []string {
 		return providers
 	}
 	return filtered
+}
+
+func adjustExecutionProvidersForEntryProtocol(entryProtocol string, providers []string) []string {
+	entryProtocol = strings.ToLower(strings.TrimSpace(entryProtocol))
+	if entryProtocol == "interactions" {
+		return preferExecutionProvider(providers, "gemini-interactions")
+	}
+	switch entryProtocol {
+	case "openai", "openai-response", "claude", "gemini":
+		return providers
+	default:
+		return excludeExecutionProvider(providers, "gemini-interactions")
+	}
+}
+
+func preferExecutionProvider(providers []string, preferred string) []string {
+	preferred = strings.ToLower(strings.TrimSpace(preferred))
+	if preferred == "" || len(providers) < 2 {
+		return providers
+	}
+	preferredIndex := -1
+	for i := range providers {
+		if strings.ToLower(strings.TrimSpace(providers[i])) == preferred {
+			preferredIndex = i
+			break
+		}
+	}
+	if preferredIndex <= 0 {
+		return providers
+	}
+	out := make([]string, 0, len(providers))
+	out = append(out, providers[preferredIndex])
+	out = append(out, providers[:preferredIndex]...)
+	out = append(out, providers[preferredIndex+1:]...)
+	return out
+}
+
+func excludeExecutionProvider(providers []string, excluded string) []string {
+	excluded = strings.ToLower(strings.TrimSpace(excluded))
+	if excluded == "" || len(providers) == 0 {
+		return providers
+	}
+	out := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if strings.ToLower(strings.TrimSpace(provider)) != excluded {
+			out = append(out, provider)
+		}
+	}
+	return out
 }
 
 func cloneBytes(src []byte) []byte {
