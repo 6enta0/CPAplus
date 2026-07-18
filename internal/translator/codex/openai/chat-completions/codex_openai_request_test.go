@@ -815,6 +815,24 @@ func TestAmbiguousDuplicateToolCallIDsAreDropped(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToCodexPreservesInputAudio(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Transcribe"},{"type":"input_audio","input_audio":{"data":"SUQzBA==","format":"mp3"}}]}]}`)
+	out := ConvertOpenAIRequestToCodex("gpt-test", input, false)
+	parts := gjson.GetBytes(out, "input.0.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("content parts = %d, want 2: %s", len(parts), out)
+	}
+	if got := parts[1].Get("type").String(); got != "input_audio" {
+		t.Fatalf("audio type = %q", got)
+	}
+	if got := parts[1].Get("data").String(); got != "SUQzBA==" {
+		t.Fatalf("audio data = %q", got)
+	}
+	if got := parts[1].Get("format").String(); got != "mp3" {
+		t.Fatalf("audio format = %q", got)
+	}
+}
+
 // Tools array should carry over to the Responses format output.
 func TestToolsDefinitionTranslated(t *testing.T) {
 	input := []byte(`{
