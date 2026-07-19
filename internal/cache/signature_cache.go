@@ -77,6 +77,7 @@ func startCacheCleanup() {
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
 func purgeExpiredCaches() {
 	now := time.Now()
+	purgeExpiredXAIReasoningReplayCache(now)
 	signatureCache.Range(func(key, value any) bool {
 		sc := value.(*groupCache)
 		sc.mu.Lock()

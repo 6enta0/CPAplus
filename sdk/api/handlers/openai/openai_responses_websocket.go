@@ -63,21 +63,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	defer close(wsDone)
 
 	if h != nil && h.AuthManager != nil {
-		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
-			type upstreamDisconnectSubscriber interface {
-				UpstreamDisconnectChan(sessionID string) <-chan error
-			}
-			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
-				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
-				if disconnectCh != nil {
-					go func() {
-						select {
-						case <-wsDone:
-							return
-						case <-disconnectCh:
-							_ = conn.Close()
-						}
-					}()
+		type upstreamDisconnectSubscriber interface {
+			UpstreamDisconnectChan(sessionID string) <-chan error
+		}
+		for _, provider := range []string{"codex", "xai"} {
+			if exec, ok := h.AuthManager.Executor(provider); ok && exec != nil {
+				if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
+					disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
+					if disconnectCh != nil {
+						go func() {
+							select {
+							case <-wsDone:
+								return
+							case <-disconnectCh:
+								_ = conn.Close()
+							}
+						}()
+					}
 				}
 			}
 		}
@@ -142,10 +144,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
-		useCodexWebsocketPassthrough := h.responsesWebsocketUsesCodexWebsocketPassthrough(requestModelName)
+		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
-		if !useCodexWebsocketPassthrough {
+		if !useUpstreamWebsocketPassthrough {
 			// CPA-mediated HTTP/SSE upstreams need the complete transcript. Incremental
 			// previous_response_id turns are reserved for end-to-end Codex websocket passthrough.
 			if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
@@ -160,7 +162,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var requestJSON []byte
 		var updatedLastRequest []byte
 		var errMsg *interfaces.ErrorMessage
-		if useCodexWebsocketPassthrough {
+		if useUpstreamWebsocketPassthrough {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
 		} else {
 			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
@@ -195,7 +197,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		if !useCodexWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
+		if !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
 			}
@@ -218,7 +220,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		previousLastResponseID := lastResponseID
 		previousLastResponsePendingToolCallIDs := append([]string(nil), lastResponsePendingToolCallIDs...)
 		forcedTranscriptReplay := forceTranscriptReplayNextRequest
-		if useCodexWebsocketPassthrough {
+		if useUpstreamWebsocketPassthrough {
 			if modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String()); modelName != "" {
 				passthroughModelName = modelName
 			}
@@ -265,7 +267,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
 		}
-		if forwardErrMsg == nil && !useCodexWebsocketPassthrough && lastAttemptedAuthID != "" && h != nil && h.AuthManager != nil {
+		if forwardErrMsg == nil && !useUpstreamWebsocketPassthrough && lastAttemptedAuthID != "" && h != nil && h.AuthManager != nil {
 			if selectedAuth, ok := h.AuthManager.GetByID(lastAttemptedAuthID); ok && selectedAuth != nil {
 				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
 					pinnedAuthID = lastAttemptedAuthID
@@ -279,7 +281,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
 			pinnedAuthID = ""
 			forceTranscriptReplayNextRequest = true
-			if useCodexWebsocketPassthrough {
+			if useUpstreamWebsocketPassthrough {
 				passthroughModelName = ""
 			} else {
 				lastRequest = previousLastRequest
@@ -289,7 +291,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		if !useCodexWebsocketPassthrough {
+		if !useUpstreamWebsocketPassthrough {
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
@@ -797,29 +799,40 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 }
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesCodexWebsocketPassthrough(modelName string) bool {
+	return h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName)
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName string) bool {
 	modelName = strings.TrimSpace(modelName)
 	if h == nil || h.AuthManager == nil || modelName == "" {
-		return false
-	}
-	if _, ok := h.AuthManager.Executor("codex"); !ok {
 		return false
 	}
 	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
 	if len(auths) == 0 {
 		return false
 	}
+	provider := ""
 	for _, auth := range auths {
 		if auth == nil {
 			return false
 		}
-		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		authProvider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if authProvider != "codex" && authProvider != "xai" {
+			return false
+		}
+		if provider == "" {
+			provider = authProvider
+			if _, ok := h.AuthManager.Executor(provider); !ok {
+				return false
+			}
+		} else if authProvider != provider {
 			return false
 		}
 		if !websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
 			return false
 		}
 	}
-	return true
+	return provider != ""
 }
 
 func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName string) ([]byte, *interfaces.ErrorMessage) {

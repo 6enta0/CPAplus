@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	grokSignature "github.com/router-for-me/CLIProxyAPI/v6/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -129,9 +130,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				signature := part.Get("signature").String()
+				rawSignature := part.Get("signature").String()
+				signature := rawSignature
 				if !isFernetLikeReasoningSignature(signature) {
-					return
+					if !codexClaudeTargetAcceptsGrokSignature(modelName) {
+						return
+					}
+					if _, err := grokSignature.InspectGrokEncryptedContent(rawSignature); err != nil {
+						return
+					}
 				}
 
 				flushMessage()
@@ -343,6 +350,11 @@ func normalizeCodexServiceTier(result gjson.Result) string {
 	default:
 		return ""
 	}
+}
+
+func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	return strings.Contains(baseModel, "grok")
 }
 
 // isFernetLikeReasoningSignature checks only the encrypted_content envelope shape

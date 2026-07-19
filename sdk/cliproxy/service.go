@@ -339,6 +339,10 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
+		if strings.EqualFold(strings.TrimSpace(existing.Provider), "xai") {
+			executor.CloseXAIWebsocketSessionsForAuthID(existing.ID, "auth_removed")
+			s.ensureExecutorsForAuth(existing)
+		}
 	}
 }
 
@@ -428,7 +432,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 		return
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))

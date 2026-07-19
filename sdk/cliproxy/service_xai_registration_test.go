@@ -15,8 +15,8 @@ func TestEnsureExecutorsForXAIAuthBindsNativeExecutor(t *testing.T) {
 	service.ensureExecutorsForAuth(&coreauth.Auth{Provider: "xai"})
 	if registered, ok := manager.Executor("xai"); !ok {
 		t.Fatal("xAI executor was not registered")
-	} else if _, ok := registered.(*executor.XAIExecutor); !ok {
-		t.Fatalf("xAI executor = %T, want *executor.XAIExecutor", registered)
+	} else if _, ok := registered.(*executor.XAIAutoExecutor); !ok {
+		t.Fatalf("xAI executor = %T, want *executor.XAIAutoExecutor", registered)
 	}
 }
 

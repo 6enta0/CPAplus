@@ -93,6 +93,7 @@ type websocketBootstrapFallbackExecutor struct {
 }
 
 type websocketDirectCaptureExecutor struct {
+	provider string
 	mu       sync.Mutex
 	authIDs  []string
 	payloads [][]byte
@@ -162,7 +163,12 @@ func (e *websocketBootstrapFallbackExecutor) Payloads(authID string) [][]byte {
 	return out
 }
 
-func (e *websocketDirectCaptureExecutor) Identifier() string { return "codex" }
+func (e *websocketDirectCaptureExecutor) Identifier() string {
+	if e != nil && strings.TrimSpace(e.provider) != "" {
+		return strings.TrimSpace(e.provider)
+	}
+	return "codex"
+}
 
 func (e *websocketDirectCaptureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
@@ -1709,6 +1715,52 @@ func TestResponsesWebsocketUsesCodexWebsocketPassthroughFalseWhenCodexAuthLacksW
 	h := NewOpenAIResponsesAPIHandler(base)
 	if h.responsesWebsocketUsesCodexWebsocketPassthrough("codex-sse-model") {
 		t.Fatal("Codex auth without websocket support unexpectedly enabled passthrough")
+	}
+}
+
+func TestWebsocketUpstreamSupportsIncrementalInputForXAI(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:         "auth-xai-ws",
+		Provider:   "xai",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "xai-test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	if !h.websocketUpstreamSupportsIncrementalInputForModel("xai-test-model") {
+		t.Fatal("expected xAI websocket upstream to support incremental input")
+	}
+}
+
+func TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	executor := &websocketDirectCaptureExecutor{provider: "xai"}
+	manager.RegisterExecutor(executor)
+
+	modelName := "xai-passthrough-model"
+	auth := &coreauth.Auth{
+		ID:         "auth-xai-ws",
+		Provider:   "xai",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	if !h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName) {
+		t.Fatalf("expected xAI websocket upstream passthrough for %s", modelName)
 	}
 }
 

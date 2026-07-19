@@ -1,11 +1,13 @@
 package claude
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
@@ -404,6 +406,25 @@ func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t
 	}
 }
 
+func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
+	signature := validGrokReasoningSignature()
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+	out := ConvertClaudeRequestToCodex("grok-4.3", payload, false)
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "reasoning" {
+		t.Fatalf("input.0.type = %q, want reasoning; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "input.0.encrypted_content").String(); got != signature {
+		t.Fatalf("encrypted_content = %q, want Grok signature", got)
+	}
+	for _, modelName := range []string{"gpt-5.4", "claude-sonnet-4-6"} {
+		if got := gjson.GetBytes(ConvertClaudeRequestToCodex(modelName, payload, false), "input.0.type").String(); got == "reasoning" {
+			t.Fatalf("Grok signature must not pass for %s", modelName)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToCodex_IgnoresNonCodexThinkingSignatures(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -481,4 +502,13 @@ func validCodexReasoningSignature() string {
 	raw[0] = 0x80
 	raw[8] = 1
 	return base64.URLEncoding.EncodeToString(raw)
+}
+
+func validGrokReasoningSignature() string {
+	raw := make([]byte, 0, 128)
+	for i := 0; len(raw) < 128; i++ {
+		sum := sha256.Sum256([]byte{byte(i), byte(i >> 8), 17})
+		raw = append(raw, sum[:]...)
+	}
+	return base64.RawStdEncoding.EncodeToString(raw[:128])
 }

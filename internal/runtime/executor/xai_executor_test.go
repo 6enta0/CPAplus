@@ -159,10 +159,14 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if !foundXSearch {
 		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
 	}
+	foundEncryptedReasoningInclude := false
 	for _, include := range gjson.GetBytes(gotBody, "include").Array() {
 		if include.String() == "reasoning.encrypted_content" {
-			t.Fatalf("xai request must not ask for encrypted reasoning content: %s", string(gotBody))
+			foundEncryptedReasoningInclude = true
 		}
+	}
+	if !foundEncryptedReasoningInclude {
+		t.Fatalf("xai request must retain encrypted reasoning content for replay: %s", string(gotBody))
 	}
 }
 

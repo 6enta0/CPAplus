@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -152,7 +153,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		errStatus := statusErr{code: httpResp.StatusCode, msg: string(data)}
+		if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, httpResp.StatusCode, data); errClear != nil {
+			return resp, errClear
+		}
+		return resp, errStatus
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -175,6 +180,12 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		if len(eventData) == 0 {
 			continue
 		}
+		if terminalErr, ok := codexTerminalFailureErr(eventData); ok {
+			if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, terminalErr.StatusCode(), eventData); errClear != nil {
+				return resp, errClear
+			}
+			return resp, terminalErr
+		}
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -184,6 +195,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = responseFilter.apply(completedData)
+			if gjson.GetBytes(completedData, "type").String() == "response.completed" {
+				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
@@ -252,11 +266,15 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, httpResp.StatusCode, data); errClear != nil {
+			err = errClear
+		}
 		return nil, nil, nil, err
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
 	return prepared, data, httpResp.Header.Clone(), nil
 }
 
@@ -611,6 +629,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, httpResp.StatusCode, data); errClear != nil {
+			return nil, errClear
+		}
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
 	}
 
@@ -632,6 +653,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
+			terminalSuccess := false
 			if bytes.HasPrefix(line, xaiDataTag) {
 				eventData := bytes.TrimSpace(line[len(xaiDataTag):])
 				eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
@@ -639,15 +661,33 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				if len(eventData) == 0 {
 					continue
 				}
+				if terminalErr, ok := codexTerminalFailureErr(eventData); ok {
+					if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, terminalErr.StatusCode(), eventData); errClear != nil {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: errClear}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				translatedLine = append([]byte("data: "), eventData...)
 				switch gjson.GetBytes(eventData, "type").String() {
 				case "response.output_item.done":
 					xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed", "response.incomplete":
+					terminalSuccess = true
 					if detail, ok := helps.ParseCodexUsage(eventData); ok {
 						reporter.Publish(ctx, detail)
 					}
 					eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+					if gjson.GetBytes(eventData, "type").String() == "response.completed" {
+						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
+					}
 					eventData = responseFilter.apply(eventData)
 					if len(eventData) == 0 {
 						continue
@@ -662,6 +702,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				case <-ctx.Done():
 					return
 				}
+			}
+			if terminalSuccess {
+				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -766,6 +809,7 @@ type xaiPreparedRequest struct {
 	clientDeclaredTools   map[xaiClientToolKey]struct{}
 	sessionID             string
 	filterInternalXSearch bool
+	replayScope           xaiReasoningReplayScope
 }
 
 type xaiNamespaceToolRef struct {
@@ -817,9 +861,15 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = pruneXAIOrphanedToolChoice(body)
 	body = normalizeXAIToolChoiceForTools(body)
 	body = ensureXAINativeXSearchTool(body)
+	var replayScope xaiReasoningReplayScope
+	body, replayScope, err = applyXAIReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	if err != nil {
+		return nil, err
+	}
 	body = normalizeXAIInputCustomToolCalls(body)
 	body = normalizeXAIInputNamespaceToolCalls(body)
 	body = normalizeXAIInputReasoningItems(body)
+	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
 	body = normalizeXAIImageRefs(body)
@@ -840,6 +890,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 		clientDeclaredTools:   clientDeclaredTools,
 		sessionID:             sessionID,
 		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
+		replayScope:           replayScope,
 	}, nil
 }
 
@@ -1049,7 +1100,6 @@ func xaiMetadataString(meta map[string]any, key string) string {
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
-	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
 		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
@@ -1057,6 +1107,51 @@ func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 		}
 	}
 	return body
+}
+
+func sanitizeXAIInputEncryptedContent(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	changed := false
+	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		encrypted := item.Get("encrypted_content")
+		if !encrypted.Exists() || encrypted.Type == gjson.Null {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		if encrypted.Type == gjson.String {
+			if _, err := signature.InspectGrokEncryptedContent(encrypted.String()); err == nil {
+				items = append(items, json.RawMessage(item.Raw))
+				continue
+			}
+		}
+		next, errDelete := sjson.DeleteBytes([]byte(item.Raw), "encrypted_content")
+		if errDelete != nil {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		items = append(items, json.RawMessage(next))
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return mergeAdjacentXAIInputReasoningSummaries(updated)
 }
 
 func ensureXAINativeXSearchTool(body []byte) []byte {
@@ -2005,23 +2100,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
 		updated = updatedItem
 	}
 	return updated, true
-}
-
-func removeXAIEncryptedReasoningInclude(body []byte) []byte {
-	include := gjson.GetBytes(body, "include")
-	if !include.Exists() || !include.IsArray() {
-		return body
-	}
-	kept := make([]string, 0, len(include.Array()))
-	for _, item := range include.Array() {
-		value := strings.TrimSpace(item.String())
-		if value == "" || value == "reasoning.encrypted_content" {
-			continue
-		}
-		kept = append(kept, value)
-	}
-	body, _ = sjson.SetBytes(body, "include", kept)
-	return body
 }
 
 func xaiSupportsReasoningEffort(model string) bool {

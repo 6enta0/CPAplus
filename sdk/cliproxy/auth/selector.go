@@ -173,14 +173,14 @@ func authWebsocketsEnabled(auth *Auth) bool {
 	return false
 }
 
-func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
+func preferWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
 	if len(available) == 0 {
 		return available
 	}
 	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
 		return available
 	}
-	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+	if !providerPrefersWebsocketTransport(provider) {
 		return available
 	}
 
@@ -265,7 +265,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -364,7 +364,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferWebsocketAuths(ctx, provider, available)
 	return available[0], nil
 }
 
