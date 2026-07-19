@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,6 +54,8 @@ type xaiWebsocketIDState struct {
 	downstreamToUpstream map[string]string
 	sequence             int
 	transcriptInput      []json.RawMessage
+	handshakeFingerprint [sha256.Size]byte
+	handshakeInitialized bool
 }
 
 type xaiWebsocketRequestIDMapper struct {
@@ -142,6 +145,18 @@ func (s *xaiWebsocketIDState) mapDownstreamToUpstream(downstreamID, upstreamID s
 	}
 	s.downstreamToUpstream[downstreamID] = strings.TrimSpace(upstreamID)
 	s.mu.Unlock()
+}
+
+func (s *xaiWebsocketIDState) updateHandshakeFingerprint(fingerprint [sha256.Size]byte) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := s.handshakeInitialized && s.handshakeFingerprint != fingerprint
+	s.handshakeFingerprint = fingerprint
+	s.handshakeInitialized = true
+	return changed
 }
 
 func (s *xaiWebsocketIDState) snapshotTranscriptInput() []byte {
@@ -417,6 +432,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		return nil, err
 	}
 	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID)
+	handshakeFingerprint := xaiWebsocketHandshakeFingerprint(e.cfg, auth, wsURL, wsHeaders)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
 	warmupRequest := xaiWebsocketGenerateFalse(wsReqBody)
 
@@ -432,8 +448,14 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		sess = e.getOrCreateSession(executionSessionID)
 		if sess != nil {
 			sess.reqMu.Lock()
-			if websocketSessionTargetChanged(sess, authID, wsURL) {
-				closeXAIWebsocketSessionConnection(sess, "target_changed")
+			targetChanged := websocketSessionTargetChanged(sess, authID, wsURL)
+			handshakeChanged := idMapper != nil && idMapper.state.updateHandshakeFingerprint(handshakeFingerprint)
+			if targetChanged || handshakeChanged {
+				reason := "handshake_changed"
+				if targetChanged {
+					reason = "target_changed"
+				}
+				closeXAIWebsocketSessionConnection(sess, reason)
 				if idMapper != nil {
 					idMapper.upstreamPreviousID = ""
 					prepared.body = idMapper.upstreamRequestPayload(prepared.body)
@@ -1252,6 +1274,26 @@ func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, toke
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 	return headers
+}
+
+func xaiWebsocketHandshakeFingerprint(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string, headers http.Header) [sha256.Size]byte {
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	snapshot, _ := json.Marshal(struct {
+		URL      string
+		ProxyURL string
+		Headers  http.Header
+	}{
+		URL:      strings.TrimSpace(wsURL),
+		ProxyURL: proxyURL,
+		Headers:  headers,
+	})
+	return sha256.Sum256(snapshot)
 }
 
 func logXAIWebsocketConnected(sessionID string, authID string, wsURL string) {

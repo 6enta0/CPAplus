@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,6 +322,194 @@ func TestXAIWebsocketsAuthChangeReplaysTranscriptWithoutPreviousID(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for failover request")
+	}
+}
+
+func TestXAIWebsocketsHandshakeChangeClosesConnectionAndReplaysTranscript(t *testing.T) {
+	type handshakeRecord struct {
+		connection int32
+		token      string
+		route      string
+	}
+	type payloadRecord struct {
+		connection int32
+		payload    []byte
+	}
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	handshakes := make(chan handshakeRecord, 2)
+	payloads := make(chan payloadRecord, 2)
+	firstClosed := make(chan struct{}, 1)
+	var connectionCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection := atomic.AddInt32(&connectionCount, 1)
+		token := r.Header.Get("Authorization")
+		route := r.Header.Get("X-Route")
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		handshakes <- handshakeRecord{connection: connection, token: token, route: route}
+		defer func() { _ = conn.Close() }()
+
+		for {
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				if connection == 1 {
+					select {
+					case firstClosed <- struct{}{}:
+					default:
+					}
+				}
+				return
+			}
+			payloads <- payloadRecord{connection: connection, payload: bytes.Clone(payload)}
+			completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-%d","output":[{"type":"message","role":"assistant","content":"answer-%d"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`, connection, connection))
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write websocket response: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	defer exec.CloseExecutionSession("auth-refresh-session")
+
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-refresh",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":       server.URL,
+			"websockets":     "true",
+			"header:X-Route": "old-route",
+		},
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "auth-refresh-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	runRequest := func(payload []byte) {
+		result, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}, opts)
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+	}
+
+	runRequest([]byte(`{"input":[{"type":"message","role":"user","content":"first"}]}`))
+	firstHandshake := <-handshakes
+	if firstHandshake.connection != 1 || firstHandshake.token != "Bearer old-token" || firstHandshake.route != "old-route" {
+		t.Fatalf("first handshake = %+v", firstHandshake)
+	}
+	firstPayload := <-payloads
+	if firstPayload.connection != 1 {
+		t.Fatalf("first payload connection = %d, want 1", firstPayload.connection)
+	}
+
+	auth.Metadata["access_token"] = "new-token"
+	auth.Attributes["header:X-Route"] = "new-route"
+	runRequest([]byte(`{"previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"second"}]}`))
+
+	select {
+	case <-firstClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old websocket connection was not closed after handshake inputs changed")
+	}
+
+	select {
+	case secondHandshake := <-handshakes:
+		if secondHandshake.connection != 2 || secondHandshake.token != "Bearer new-token" || secondHandshake.route != "new-route" {
+			t.Fatalf("second handshake = %+v", secondHandshake)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for refreshed websocket handshake")
+	}
+
+	select {
+	case secondPayload := <-payloads:
+		if secondPayload.connection != 2 {
+			t.Fatalf("second payload connection = %d, want 2", secondPayload.connection)
+		}
+		if gjson.GetBytes(secondPayload.payload, "previous_response_id").Exists() {
+			t.Fatalf("previous_response_id leaked after handshake change: %s", secondPayload.payload)
+		}
+		input := gjson.GetBytes(secondPayload.payload, "input")
+		if !input.IsArray() || len(input.Array()) != 3 {
+			t.Fatalf("replayed input = %s, want full three-item transcript", input.Raw)
+		}
+		if input.Array()[0].Get("content").String() != "first" || input.Array()[1].Get("content").String() != "answer-1" || input.Array()[2].Get("content").String() != "second" {
+			t.Fatalf("replayed transcript order is wrong: %s", secondPayload.payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for refreshed websocket request")
+	}
+}
+
+func TestXAIWebsocketHandshakeFingerprintTracksHandshakeInputs(t *testing.T) {
+	fingerprint := func(cfg *config.Config, auth *cliproxyauth.Auth, wsURL string) [32]byte {
+		token, _ := xaiCreds(auth)
+		headers := applyXAIWebsocketHeaders(http.Header{}, auth, token, "fingerprint-session")
+		return xaiWebsocketHandshakeFingerprint(cfg, auth, wsURL, headers)
+	}
+
+	baseAuth := &cliproxyauth.Auth{
+		ProxyURL: "http://proxy-old.example",
+		Attributes: map[string]string{
+			"header:X-Route": "old-route",
+			"priority":       "1",
+		},
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	baseline := fingerprint(&config.Config{}, baseAuth, "wss://api.x.ai/v1/responses")
+
+	tokenChanged := baseAuth.Clone()
+	tokenChanged.Metadata["access_token"] = "new-token"
+	if got := fingerprint(&config.Config{}, tokenChanged, "wss://api.x.ai/v1/responses"); got == baseline {
+		t.Fatal("access token change did not change websocket handshake fingerprint")
+	}
+
+	proxyChanged := baseAuth.Clone()
+	proxyChanged.ProxyURL = "http://proxy-new.example"
+	if got := fingerprint(&config.Config{}, proxyChanged, "wss://api.x.ai/v1/responses"); got == baseline {
+		t.Fatal("proxy URL change did not change websocket handshake fingerprint")
+	}
+
+	headerChanged := baseAuth.Clone()
+	headerChanged.Attributes["header:X-Route"] = "new-route"
+	if got := fingerprint(&config.Config{}, headerChanged, "wss://api.x.ai/v1/responses"); got == baseline {
+		t.Fatal("custom header change did not change websocket handshake fingerprint")
+	}
+
+	if got := fingerprint(&config.Config{}, baseAuth, "wss://alt.x.ai/v1/responses"); got == baseline {
+		t.Fatal("base URL change did not change websocket handshake fingerprint")
+	}
+
+	unrelatedChanged := baseAuth.Clone()
+	unrelatedChanged.Attributes["priority"] = "2"
+	if got := fingerprint(&config.Config{}, unrelatedChanged, "wss://api.x.ai/v1/responses"); got != baseline {
+		t.Fatal("non-handshake attribute changed websocket handshake fingerprint")
+	}
+
+	globalProxyAuth := baseAuth.Clone()
+	globalProxyAuth.ProxyURL = ""
+	oldGlobalProxy := fingerprint(&config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global-old.example"}}, globalProxyAuth, "wss://api.x.ai/v1/responses")
+	newGlobalProxy := fingerprint(&config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global-new.example"}}, globalProxyAuth, "wss://api.x.ai/v1/responses")
+	if oldGlobalProxy == newGlobalProxy {
+		t.Fatal("global proxy URL change did not change websocket handshake fingerprint")
 	}
 }
 
