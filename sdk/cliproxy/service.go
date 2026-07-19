@@ -428,7 +428,7 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
-		// Native xAI request execution is added by the Responses/WS child task.
+		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 		return
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))

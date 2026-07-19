@@ -4,16 +4,19 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
-func TestEnsureExecutorsForXAIAuthDoesNotBindCompatibilityExecutor(t *testing.T) {
+func TestEnsureExecutorsForXAIAuthBindsNativeExecutor(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{cfg: &sdkconfig.Config{}, coreManager: manager}
 	service.ensureExecutorsForAuth(&coreauth.Auth{Provider: "xai"})
-	if registered, ok := manager.Executor("xai"); ok || registered != nil {
-		t.Fatalf("xAI executor = %T, want unbound until Responses/WS task", registered)
+	if registered, ok := manager.Executor("xai"); !ok {
+		t.Fatal("xAI executor was not registered")
+	} else if _, ok := registered.(*executor.XAIExecutor); !ok {
+		t.Fatalf("xAI executor = %T, want *executor.XAIExecutor", registered)
 	}
 }
 
