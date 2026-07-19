@@ -130,3 +130,86 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplaysCustomToolHi
 		t.Fatalf("tool output = %q, want flattened content; output=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsBatchesMixedToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call_read","name":"read","arguments":"{}"},
+			{"type":"custom_tool_call","call_id":"call_exec","name":"exec","input":"pwd"},
+			{"type":"custom_tool_call_output","call_id":"call_exec","output":"done"},
+			{"type":"function_call_output","call_id":"call_read","output":"read result"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("model", raw, false)
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.#").Int(); got != 2 {
+		t.Fatalf("tool call count = %d, want 2; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.0.id").String(); got != "call_read" {
+		t.Fatalf("first tool call id = %q, want call_read; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.1.id").String(); got != "call_exec" {
+		t.Fatalf("second tool call id = %q, want call_exec; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_exec" {
+		t.Fatalf("first output id = %q, want call_exec; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_read" {
+		t.Fatalf("second output id = %q, want call_read; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsDefersMessagesUntilAllToolOutputs(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call_a","name":"a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"b","arguments":"{}"},
+			{"type":"message","role":"user","content":"do not insert here"},
+			{"type":"function_call_output","call_id":"call_b","output":"b"},
+			{"type":"function_call_output","call_id":"call_a","output":"a"},
+			{"type":"message","role":"user","content":"continue"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("model", raw, false)
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+		t.Fatalf("messages count = %d, want 5; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.tool_calls.#").Int(); got != 2 {
+		t.Fatalf("tool call count = %d, want 2; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_b" {
+		t.Fatalf("first output id = %q, want call_b; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_a" {
+		t.Fatalf("second output id = %q, want call_a; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.3.content").String(); got != "do not insert here" {
+		t.Fatalf("deferred message = %q, want do not insert here; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsUsesStructuredFunctionOutputText(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call_array","name":"array_output","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_array","output":["/repo",{"type":"input_text","text":"\n"}]},
+			{"type":"function_call","call_id":"call_object","name":"object_output","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_object","output":{"value":42}}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("model", raw, false)
+	if got := gjson.GetBytes(out, "messages.1.content").String(); got != "/repo\n" {
+		t.Fatalf("array output = %q, want /repo\\n; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.3.tool_call_id").String(); got != "call_object" {
+		t.Fatalf("object output id = %q, want call_object; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.3.content").String(); got != `{"value":42}` {
+		t.Fatalf("object output = %q, want raw JSON object; output=%s", got, out)
+	}
+}
