@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -99,6 +100,41 @@ func TestInteractionsRouteIsRegistered(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "exactly one of model or agent") {
 		t.Fatalf("body = %s, want Interactions validation error", recorder.Body.String())
+	}
+}
+
+func TestUpdateClientsCountsXAIKeys(t *testing.T) {
+	server := newTestServer(t)
+	cfg := *server.cfg
+	cfg.XAIKey = []proxyconfig.XAIKey{
+		{APIKey: "xai-key-1", BaseURL: "https://api.x.ai/v1"},
+		{APIKey: "xai-key-2", BaseURL: "https://api.x.ai/v1"},
+	}
+
+	reader, writer, errPipe := os.Pipe()
+	if errPipe != nil {
+		t.Fatalf("os.Pipe() error = %v", errPipe)
+	}
+	defer func() {
+		if errClose := reader.Close(); errClose != nil {
+			t.Errorf("close stdout reader: %v", errClose)
+		}
+	}()
+	oldStdout := os.Stdout
+	os.Stdout = writer
+	defer func() { os.Stdout = oldStdout }()
+
+	server.UpdateClients(&cfg)
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("close stdout writer: %v", errClose)
+	}
+	os.Stdout = oldStdout
+	output, errRead := io.ReadAll(reader)
+	if errRead != nil {
+		t.Fatalf("read stdout: %v", errRead)
+	}
+	if !strings.Contains(string(output), "2 xAI keys") {
+		t.Fatalf("client update output does not include xAI count: %s", output)
 	}
 }
 
