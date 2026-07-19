@@ -29,7 +29,10 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 )
 
-var xaiDataTag = []byte("data:")
+var (
+	xaiDataTag  = []byte("data:")
+	xaiEventTag = []byte("event:")
+)
 
 const (
 	xaiImageHandlerType         = "openai-image"
@@ -50,6 +53,18 @@ const (
 	xaiWebSearchToolType        = "web_search"
 	xaiXSearchToolType          = "x_search"
 )
+
+const xaiIncompleteStreamMessage = "xai stream error: stream disconnected before response.completed"
+
+type xaiIncompleteStreamError struct {
+	statusErr
+}
+
+func newXAIIncompleteStreamError() xaiIncompleteStreamError {
+	return xaiIncompleteStreamError{statusErr: statusErr{code: http.StatusRequestTimeout, msg: xaiIncompleteStreamMessage}}
+}
+
+func (xaiIncompleteStreamError) IsRequestScoped() bool { return true }
 
 var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
 
@@ -160,11 +175,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, errStatus
 	}
 
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
+	data, readErr := io.ReadAll(httpResp.Body)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	outputItemsByIndex := make(map[int64][]byte)
@@ -174,19 +185,22 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
-		eventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
 		eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
-		eventData = responseFilter.apply(eventData)
-		if len(eventData) == 0 {
-			continue
-		}
 		if terminalErr, ok := codexTerminalFailureErr(eventData); ok {
 			if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, terminalErr.StatusCode(), eventData); errClear != nil {
 				return resp, errClear
 			}
 			return resp, terminalErr
 		}
-		switch gjson.GetBytes(eventData, "type").String() {
+		eventType := gjson.GetBytes(eventData, "type").String()
+		if eventType != "response.completed" && eventType != "response.incomplete" {
+			eventData = responseFilter.apply(eventData)
+			if len(eventData) == 0 {
+				continue
+			}
+		}
+		switch eventType {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed", "response.incomplete":
@@ -194,7 +208,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				reporter.Publish(ctx, detail)
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			completedData = responseFilter.apply(completedData)
+			if len(completedData) == 0 {
+				completedData = eventData
+			}
 			if gjson.GetBytes(completedData, "type").String() == "response.completed" {
 				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			}
@@ -204,7 +222,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed"}
+	if readErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+		return resp, readErr
+	}
+	return resp, newXAIIncompleteStreamError()
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -649,61 +671,109 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			translatedLine := bytes.Clone(line)
-			terminalSuccess := false
-			if bytes.HasPrefix(line, xaiDataTag) {
-				eventData := bytes.TrimSpace(line[len(xaiDataTag):])
-				eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
-				eventData = responseFilter.apply(eventData)
-				if len(eventData) == 0 {
-					continue
-				}
-				if terminalErr, ok := codexTerminalFailureErr(eventData); ok {
-					if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, terminalErr.StatusCode(), eventData); errClear != nil {
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClear}:
-						case <-ctx.Done():
-						}
-						return
-					}
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
-					case <-ctx.Done():
-					}
-					return
-				}
-				translatedLine = append([]byte("data: "), eventData...)
-				switch gjson.GetBytes(eventData, "type").String() {
-				case "response.output_item.done":
-					xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-				case "response.completed", "response.incomplete":
-					terminalSuccess = true
-					if detail, ok := helps.ParseCodexUsage(eventData); ok {
-						reporter.Publish(ctx, detail)
-					}
-					eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-					if gjson.GetBytes(eventData, "type").String() == "response.completed" {
-						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
-					}
-					eventData = responseFilter.apply(eventData)
-					if len(eventData) == 0 {
-						continue
-					}
-					translatedLine = append([]byte("data: "), eventData...)
-				}
-			}
+		var pendingEventLine []byte
+		terminalObserved := false
+		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, translatedLine, &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
-					return
+					return false
 				}
 			}
-			if terminalSuccess {
+			return true
+		}
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if bytes.HasPrefix(line, xaiEventTag) {
+				if pendingEventLine != nil && !emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")) {
+					return
+				}
+				pendingEventLine = bytes.Clone(line)
+				continue
+			}
+
+			if bytes.HasPrefix(line, xaiDataTag) {
+				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
+				hasPendingEventLine := pendingEventLine != nil
+				for i, eventData := range eventDataList {
+					eventData = restoreXAINamespaceToolCalls(eventData, prepared.namespaceTools)
+					eventType := gjson.GetBytes(eventData, "type").String()
+					terminalEvent := eventType == "response.completed" || eventType == "response.incomplete"
+					if terminalErr, ok := codexTerminalFailureErr(eventData); ok {
+						if errClear := clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.replayScope, terminalErr.StatusCode(), eventData); errClear != nil {
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: errClear}:
+							case <-ctx.Done():
+							}
+							return
+						}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
+
+					if terminalEvent {
+						terminalObserved = true
+						if detail, ok := helps.ParseCodexUsage(eventData); ok {
+							reporter.Publish(ctx, detail)
+						}
+						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+						eventData = xaiNormalizeReasoningSummaryData(eventData)
+						if eventType == "response.completed" {
+							cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
+						}
+					}
+					eventData = responseFilter.apply(eventData)
+					if len(eventData) == 0 {
+						if hasPendingEventLine && i == 0 {
+							pendingEventLine = nil
+						}
+						if terminalEvent {
+							return
+						}
+						continue
+					}
+
+					if eventType == "response.output_item.done" {
+						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+					}
+					if hasPendingEventLine {
+						eventLine := []byte("event: " + gjson.GetBytes(eventData, "type").String())
+						if i == 0 {
+							eventLine = xaiNormalizeReasoningSummaryEventLine(pendingEventLine, gjson.GetBytes(eventData, "type").String())
+							pendingEventLine = nil
+						}
+						if !emitTranslatedLine(eventLine) {
+							return
+						}
+					}
+					if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
+						return
+					}
+					if terminalEvent {
+						return
+					}
+				}
+				continue
+			}
+
+			if pendingEventLine != nil {
+				if !emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")) {
+					return
+				}
+				pendingEventLine = nil
+			}
+			if !emitTranslatedLine(bytes.Clone(line)) {
+				return
+			}
+		}
+		if pendingEventLine != nil {
+			if !emitTranslatedLine(xaiNormalizeReasoningSummaryEventLine(pendingEventLine, "")) {
 				return
 			}
 		}
@@ -712,6 +782,16 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			reporter.PublishFailure(ctx)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if !terminalObserved {
+			streamErr := newXAIIncompleteStreamError()
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.PublishFailure(ctx)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 			case <-ctx.Done():
 			}
 		}
@@ -2112,6 +2192,173 @@ func xaiSupportsReasoningEffort(model string) bool {
 	}
 	info := registry.LookupModelInfo(name, "xai")
 	return info != nil && info.Thinking != nil && len(info.Thinking.Levels) > 0
+}
+
+func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {
+	if eventName == "" && bytes.HasPrefix(line, xaiEventTag) {
+		eventName = strings.TrimSpace(string(line[len(xaiEventTag):]))
+	}
+	eventName = xaiNormalizeReasoningSummaryEventName(eventName)
+	if eventName == "" {
+		return bytes.Clone(line)
+	}
+	return []byte("event: " + eventName)
+}
+
+func xaiNormalizeReasoningSummaryEventName(eventName string) string {
+	switch eventName {
+	case "response.reasoning_text.delta":
+		return "response.reasoning_summary_text.delta"
+	case "response.reasoning_text.done":
+		return "response.reasoning_summary_part.done"
+	default:
+		return eventName
+	}
+}
+
+func xaiNormalizeReasoningSummaryData(eventData []byte) []byte {
+	if len(eventData) == 0 || !gjson.ValidBytes(eventData) {
+		return eventData
+	}
+
+	normalized := eventData
+	switch gjson.GetBytes(normalized, "type").String() {
+	case "response.reasoning_text.delta":
+		normalized, _ = sjson.SetBytes(normalized, "type", "response.reasoning_summary_text.delta")
+		normalized = xaiNormalizeReasoningSummaryIndex(normalized)
+	case "response.reasoning_text.done":
+		normalized, _ = sjson.SetBytes(normalized, "type", "response.reasoning_summary_part.done")
+		normalized, _ = sjson.SetBytes(normalized, "part.type", "summary_text")
+		if text := gjson.GetBytes(normalized, "text"); text.Exists() {
+			normalized, _ = sjson.SetBytes(normalized, "part.text", text.String())
+		}
+		normalized, _ = sjson.DeleteBytes(normalized, "text")
+		normalized = xaiNormalizeReasoningSummaryIndex(normalized)
+	case "response.content_part.added":
+		if gjson.GetBytes(normalized, "part.type").String() == "reasoning_text" {
+			normalized, _ = sjson.SetBytes(normalized, "type", "response.reasoning_summary_part.added")
+			normalized, _ = sjson.SetBytes(normalized, "part.type", "summary_text")
+			normalized = xaiNormalizeReasoningSummaryIndex(normalized)
+		}
+	case "response.content_part.done":
+		if gjson.GetBytes(normalized, "part.type").String() == "reasoning_text" {
+			normalized, _ = sjson.SetBytes(normalized, "type", "response.reasoning_summary_part.done")
+			normalized, _ = sjson.SetBytes(normalized, "part.type", "summary_text")
+			normalized = xaiNormalizeReasoningSummaryIndex(normalized)
+		}
+	}
+
+	if item := gjson.GetBytes(normalized, "item"); item.Exists() && item.Type == gjson.JSON {
+		updatedItem := xaiNormalizeReasoningOutputItem([]byte(item.Raw))
+		if !bytes.Equal(updatedItem, []byte(item.Raw)) {
+			normalized, _ = sjson.SetRawBytes(normalized, "item", updatedItem)
+		}
+	}
+	if output := gjson.GetBytes(normalized, "response.output"); output.IsArray() {
+		updatedOutput, changed := xaiNormalizeReasoningOutputItems(output.Array())
+		if changed {
+			normalized, _ = sjson.SetRawBytes(normalized, "response.output", updatedOutput)
+		}
+	}
+
+	return normalized
+}
+
+func xaiNormalizeReasoningSummaryDataEvents(eventData []byte) [][]byte {
+	if len(eventData) == 0 || !gjson.ValidBytes(eventData) {
+		return [][]byte{eventData}
+	}
+	if gjson.GetBytes(eventData, "type").String() != "response.reasoning_text.done" {
+		return [][]byte{xaiNormalizeReasoningSummaryData(eventData)}
+	}
+
+	textDone, _ := sjson.SetBytes(eventData, "type", "response.reasoning_summary_text.done")
+	textDone = xaiNormalizeReasoningSummaryIndex(textDone)
+	partDone := xaiNormalizeReasoningSummaryData(eventData)
+	return [][]byte{textDone, partDone}
+}
+
+func xaiNormalizeReasoningSummaryIndex(eventData []byte) []byte {
+	contentIndex := gjson.GetBytes(eventData, "content_index")
+	if contentIndex.Exists() && contentIndex.Raw != "" && !gjson.GetBytes(eventData, "summary_index").Exists() {
+		eventData, _ = sjson.SetRawBytes(eventData, "summary_index", []byte(contentIndex.Raw))
+	}
+	eventData, _ = sjson.DeleteBytes(eventData, "content_index")
+	return eventData
+}
+
+func xaiNormalizeReasoningOutputItems(items []gjson.Result) ([]byte, bool) {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	changed := false
+	for i, item := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		updatedItem := xaiNormalizeReasoningOutputItem([]byte(item.Raw))
+		if !bytes.Equal(updatedItem, []byte(item.Raw)) {
+			changed = true
+		}
+		buf.Write(updatedItem)
+	}
+	buf.WriteByte(']')
+	return buf.Bytes(), changed
+}
+
+func xaiNormalizeReasoningOutputItem(item []byte) []byte {
+	if !gjson.ValidBytes(item) || gjson.GetBytes(item, "type").String() != "reasoning" {
+		return item
+	}
+
+	normalized := item
+	if summary := gjson.GetBytes(normalized, "summary"); summary.IsArray() {
+		updatedSummary, changed := xaiNormalizeReasoningSummaryItems(summary.Array())
+		if changed {
+			normalized, _ = sjson.SetRawBytes(normalized, "summary", updatedSummary)
+		}
+	}
+
+	content := gjson.GetBytes(normalized, "content")
+	if !content.IsArray() {
+		return normalized
+	}
+
+	summaryItems := make([]gjson.Result, 0, len(content.Array()))
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "reasoning_text" {
+			summaryItems = append(summaryItems, part)
+		}
+	}
+	if len(summaryItems) == 0 {
+		return normalized
+	}
+
+	updatedSummary, _ := xaiNormalizeReasoningSummaryItems(summaryItems)
+	normalized, _ = sjson.SetRawBytes(normalized, "summary", updatedSummary)
+	normalized, _ = sjson.DeleteBytes(normalized, "content")
+	return normalized
+}
+
+func xaiNormalizeReasoningSummaryItems(items []gjson.Result) ([]byte, bool) {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	changed := false
+	for i, item := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		itemRaw := []byte(item.Raw)
+		if item.Get("type").String() == "reasoning_text" {
+			var errSet error
+			itemRaw, errSet = sjson.SetBytes(itemRaw, "type", "summary_text")
+			if errSet == nil {
+				changed = true
+			}
+		}
+		buf.Write(itemRaw)
+	}
+	buf.WriteByte(']')
+	return buf.Bytes(), changed
 }
 
 func xaiCollectOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
