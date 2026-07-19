@@ -60,6 +60,11 @@ const (
 	xaiClientVersionHeader      = "x-grok-client-version"
 	xaiClientVersionValue       = "0.2.93"
 	xaiUsingAPIAttr             = "using_api"
+	// Codex Desktop sends codex_app.automation_update with a large oneOf/$ref
+	// schema that can stall xAI free/build Responses streams.
+	xaiCodexAppNamespaceName    = "codex_app"
+	xaiAutomationUpdateToolName = "automation_update"
+	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
 )
 
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
@@ -1685,11 +1690,24 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 	if toolType == xaiToolSearchType || toolType == xaiImageGenerationToolType {
 		return nil, true, true
 	}
+	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
+		return nil, true, true
+	}
+
 	raw := []byte(tool.Raw)
-	if toolType == xaiCustomToolType {
-		if tool.Get("name").String() == "apply_patch" {
-			return nil, true, true
+	schemaTool := tool
+	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
+		updatedTool, schemaChanged, ok := normalizeXAIObjectRootUnionBranchTypes(raw)
+		if !ok {
+			return nil, false, false
 		}
+		raw = updatedTool
+		if schemaChanged {
+			schemaTool = gjson.ParseBytes(raw)
+			changed = true
+		}
+	}
+	if toolType == xaiCustomToolType {
 		updatedTool, errSet := sjson.SetBytes(raw, "type", xaiFunctionToolType)
 		if errSet != nil {
 			return nil, false, false
@@ -1706,13 +1724,29 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, bo
 		raw = updatedTool
 		changed = true
 	}
-	if toolType == xaiFunctionToolType && !tool.Get("parameters").Exists() {
+	if toolType == xaiFunctionToolType && !schemaTool.Get("parameters").Exists() {
 		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(`{"type":"object","properties":{}}`))
 		if errSet != nil {
 			return nil, false, false
 		}
 		raw = updatedTool
 		changed = true
+	}
+	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(schemaTool, namespaceName) {
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		if errSet != nil {
+			return nil, false, false
+		}
+		raw = updatedTool
+		if strict := tool.Get("strict"); strict.Exists() && strict.Bool() {
+			updatedTool, errSet = sjson.SetBytes(raw, "strict", false)
+			if errSet != nil {
+				return nil, false, false
+			}
+			raw = updatedTool
+		}
+		changed = true
+		log.Debugf("xai: simplified parameters for tool %s.%s to avoid upstream schema rejection or hang", namespaceName, tool.Get("name").String())
 	}
 	if toolType == xaiFunctionToolType && strings.TrimSpace(namespaceName) != "" {
 		qualifiedName := qualifyXAINamespaceToolName(namespaceName, tool.Get("name").String())
@@ -1743,6 +1777,85 @@ func qualifyXAINamespaceToolName(namespaceName, toolName string) string {
 		return toolName
 	}
 	return prefix + toolName
+}
+
+// normalizeXAIObjectRootUnionBranchTypes makes untyped root union branches
+// explicitly object-only when the parameter root already declares object.
+func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
+	parameters := gjson.GetBytes(tool, "parameters")
+	if parameters.Get("type").Type != gjson.String || parameters.Get("type").String() != "object" {
+		return tool, false, true
+	}
+
+	original := tool
+	changed := false
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for index, branch := range union.Array() {
+			if !branch.IsObject() || branch.Get("type").Exists() {
+				continue
+			}
+			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
+			if errSet != nil {
+				return original, false, false
+			}
+			tool = updated
+			changed = true
+		}
+	}
+	return tool, changed, true
+}
+
+func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
+	if schemaType.Type == gjson.String {
+		return strings.EqualFold(strings.TrimSpace(schemaType.String()), "object")
+	}
+	if !schemaType.IsArray() {
+		return false
+	}
+	types := schemaType.Array()
+	if len(types) == 0 {
+		return false
+	}
+	for _, item := range types {
+		if item.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(item.String()), "object") {
+			return false
+		}
+	}
+	return true
+}
+
+// xaiFunctionParametersNeedSimplification detects the known Codex Desktop
+// automation schema and root unions containing non-object branches.
+func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	if toolType != xaiFunctionToolType && toolType != xaiCustomToolType {
+		return false
+	}
+
+	toolName := strings.TrimSpace(tool.Get("name").String())
+	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if toolType == xaiFunctionToolType && (strings.EqualFold(toolName, qualifiedAutomationName) ||
+		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) && strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+		return true
+	}
+
+	parameters := tool.Get("parameters")
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		union := parameters.Get(unionName)
+		if !union.IsArray() {
+			continue
+		}
+		for _, branch := range union.Array() {
+			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func collectXAINamespaceToolRefs(body []byte) map[string]xaiNamespaceToolRef {
