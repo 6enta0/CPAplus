@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -1344,6 +1346,145 @@ func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T)
 				t.Fatalf("path = %q, want %s", gotPath, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestXAIExecutorMediaUsage(t *testing.T) {
+	capture := &xaiUsageCapture{records: make(chan usage.Record, 8)}
+	usage.RegisterPlugin(capture)
+
+	t.Run("image success publishes upstream usage", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"b64_json":"AA=="}],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`))
+		}))
+		defer server.Close()
+
+		exec := NewXAIExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider:   "xai",
+			Attributes: map[string]string{"base_url": server.URL},
+			Metadata:   map[string]any{"access_token": "xai-token"},
+		}
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "grok-imagine-image",
+			Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-image"),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+
+		record := capture.waitForModel(t, "grok-imagine-image")
+		if record.Failed {
+			t.Fatalf("usage record failed = true: %+v", record)
+		}
+		if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
+			t.Fatalf("usage detail = %+v", record.Detail)
+		}
+	})
+
+	t.Run("video retrieval publishes upstream usage", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"request_id":"vid_123","status":"done","usage":{"input_tokens":5,"output_tokens":6,"total_tokens":11}}`))
+		}))
+		defer server.Close()
+
+		exec := NewXAIExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider:   "xai",
+			Attributes: map[string]string{"base_url": server.URL},
+			Metadata:   map[string]any{"access_token": "xai-token"},
+		}
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "grok-imagine-video",
+			Payload: []byte(`{"request_id":"vid_123"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-video"),
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+
+		record := capture.waitForModel(t, "grok-imagine-video")
+		if record.Failed {
+			t.Fatalf("usage record failed = true: %+v", record)
+		}
+		if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 6 || record.Detail.TotalTokens != 11 {
+			t.Fatalf("usage detail = %+v", record.Detail)
+		}
+	})
+
+	t.Run("invalid media response publishes one failure", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("not-json"))
+		}))
+		defer server.Close()
+
+		exec := NewXAIExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider:   "xai",
+			Attributes: map[string]string{"base_url": server.URL},
+			Metadata:   map[string]any{"access_token": "xai-token"},
+		}
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "grok-imagine-image",
+			Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-image"),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+			},
+		})
+		if err == nil {
+			t.Fatal("Execute() error = nil, want invalid response error")
+		}
+
+		record := capture.waitForModel(t, "grok-imagine-image")
+		if !record.Failed {
+			t.Fatalf("usage record failed = false: %+v", record)
+		}
+		select {
+		case extra := <-capture.records:
+			t.Fatalf("received duplicate usage record: %+v", extra)
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+}
+
+type xaiUsageCapture struct {
+	records chan usage.Record
+}
+
+func (c *xaiUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
+	if record.Provider != "xai" {
+		return
+	}
+	select {
+	case c.records <- record:
+	default:
+	}
+}
+
+func (c *xaiUsageCapture) waitForModel(t *testing.T, model string) usage.Record {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case record := <-c.records:
+			if record.Model == model {
+				return record
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for xAI usage record for model %q", model)
+			return usage.Record{}
+		}
 	}
 }
 
