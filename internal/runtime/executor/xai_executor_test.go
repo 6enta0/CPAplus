@@ -948,3 +948,333 @@ func TestNormalizeXAIToolChoiceForTools_NoOpWhenBothAbsent(t *testing.T) {
 		t.Fatalf("tool_choice should not appear: %s", string(out))
 	}
 }
+func TestXAIExecutorExecuteImagesUsesImagesEndpoint(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotAccept string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotAccept = r.Header.Get("Accept")
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"AA=="}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":  server.URL,
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image",
+		Payload: []byte(`{"model":"grok-imagine-image","prompt":"draw"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotPath != "/images/generations" {
+		t.Fatalf("path = %q, want /images/generations", gotPath)
+	}
+	if gotAuth != "Bearer xai-token" {
+		t.Fatalf("Authorization = %q, want Bearer xai-token", gotAuth)
+	}
+	if gotAccept != "application/json" {
+		t.Fatalf("Accept = %q, want application/json", gotAccept)
+	}
+	if string(gotBody) != `{"model":"grok-imagine-image","prompt":"draw"}` {
+		t.Fatalf("body = %s", string(gotBody))
+	}
+	if gjson.GetBytes(resp.Payload, "data.0.b64_json").String() != "AA==" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"url":"https://x.ai/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image",
+		Payload: []byte(`{"model":"grok-imagine-image","prompt":"edit","image":{"type":"image_url","url":"https://example.com/a.png"}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotPath != "/images/edits" {
+		t.Fatalf("path = %q, want /images/edits", gotPath)
+	}
+}
+
+func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	var gotAuth string
+	var gotIdempotencyKey string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotIdempotencyKey = r.Header.Get("x-idempotency-key")
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"request_id":"vid_123"}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-video",
+		Payload: []byte(`{"model":"grok-imagine-video","prompt":"animate","duration":4}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+		Metadata: map[string]any{
+			"idempotency_key": "idem-123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/videos/generations" {
+		t.Fatalf("path = %q, want /videos/generations", gotPath)
+	}
+	if gotAuth != "Bearer xai-token" {
+		t.Fatalf("Authorization = %q, want Bearer xai-token", gotAuth)
+	}
+	if gotIdempotencyKey != "idem-123" {
+		t.Fatalf("x-idempotency-key = %q, want idem-123", gotIdempotencyKey)
+	}
+	if string(gotBody) != `{"model":"grok-imagine-video","prompt":"animate","duration":4}` {
+		t.Fatalf("body = %s", string(gotBody))
+	}
+	if gjson.GetBytes(resp.Payload, "request_id").String() != "vid_123" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorExecuteVideosRetrieve(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"done","video":{"url":"https://vidgen.x.ai/video.mp4","duration":6},"model":"grok-imagine-video","progress":100}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-video",
+		Payload: []byte(`{"request_id":"vid_123"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/videos/vid_123" {
+		t.Fatalf("path = %q, want /videos/vid_123", gotPath)
+	}
+	if gjson.GetBytes(resp.Payload, "video.url").String() != "https://vidgen.x.ai/video.mp4" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestPath string
+		wantPath    string
+	}{
+		{
+			name:        "generations",
+			requestPath: "/v1/videos/generations",
+			wantPath:    "/videos/generations",
+		},
+		{
+			name:        "edits",
+			requestPath: "/v1/videos/edits",
+			wantPath:    "/videos/edits",
+		},
+		{
+			name:        "extensions",
+			requestPath: "/v1/videos/extensions",
+			wantPath:    "/videos/extensions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			var gotMethod string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotMethod = r.Method
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"request_id":"vid_123"}`))
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "grok-imagine-video",
+				Payload: []byte(`{"model":"grok-imagine-video","prompt":"animate"}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-video"),
+				Metadata: map[string]any{
+					cliproxyexecutor.RequestPathMetadataKey: tt.requestPath,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			if gotMethod != http.MethodPost {
+				t.Fatalf("method = %q, want POST", gotMethod)
+			}
+			if gotPath != tt.wantPath {
+				t.Fatalf("path = %q, want %s", gotPath, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestNormalizeXAIImageRefsRewritesImageURLField(t *testing.T) {
+	in := []byte(`{
+		"image":{"type":"image_url","image_url":"https://example.com/a.png"},
+		"images":[{"image_url":{"url":"https://example.com/b.png"}},{"url":"https://example.com/c.png","image_url":"https://example.com/ignored.png"}],
+		"reference_images":[{"image_url":"https://example.com/d.png"}],
+		"nested":{"image":{"image_url":"https://example.com/e.png"}},
+		"content":[{"type":"image_url","image_url":{"url":"https://example.com/keep.png"}}]
+	}`)
+
+	out := normalizeXAIImageRefs(in)
+
+	for path, want := range map[string]string{
+		"image.url":               "https://example.com/a.png",
+		"images.0.url":            "https://example.com/b.png",
+		"images.1.url":            "https://example.com/c.png",
+		"reference_images.0.url":  "https://example.com/d.png",
+		"nested.image.url":        "https://example.com/e.png",
+		"content.0.image_url.url": "https://example.com/keep.png",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != want {
+			t.Fatalf("%s = %q, want %q; body=%s", path, got, want, out)
+		}
+	}
+	for _, path := range []string{"image.image_url", "images.0.image_url", "images.1.image_url", "reference_images.0.image_url", "nested.image.image_url"} {
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("%s should be removed; body=%s", path, out)
+		}
+	}
+	if gjson.GetBytes(out, "content.0.url").Exists() {
+		t.Fatalf("chat content image part must remain unchanged; body=%s", out)
+	}
+}
+
+func TestXAIExecutorExecuteImagesRewritesImageURLToURL(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"url":"https://x.ai/image.png"}]}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-imagine-image",
+		Payload: []byte(`{"model":"grok-imagine-image","prompt":"edit","image":{"image_url":"https://example.com/a.png"}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "image.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("upstream image.url = %q; body=%s", got, gotBody)
+	}
+	if gjson.GetBytes(gotBody, "image.image_url").Exists() {
+		t.Fatalf("upstream body still has image.image_url: %s", gotBody)
+	}
+}

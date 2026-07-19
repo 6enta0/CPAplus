@@ -109,7 +109,7 @@ func isSupportedImagesModel(model string) bool {
 	if idx := strings.LastIndex(baseModel, "/"); idx >= 0 && idx < len(baseModel)-1 {
 		baseModel = strings.TrimSpace(baseModel[idx+1:])
 	}
-	return baseModel == defaultImagesToolModel
+	return baseModel == defaultImagesToolModel || isXAIImagesModel(model)
 }
 
 func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
@@ -250,6 +250,12 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+
+	if isXAIImagesModel(imageModel) {
+		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
+		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
+		return
+	}
 
 	if shouldPassthroughOpenAICompatImages(imageModel) {
 		h.handleOpenAICompatImages(c, rawJSON, responseFormat, "image_generation", stream)
@@ -400,6 +406,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
+	if isXAIImagesModel(imageModel) {
+		aspectRatio := xaiImagesAspectRatio(c.PostForm("aspect_ratio"), "")
+		aspectRatio = xaiImagesAspectRatioFromSize(c.PostForm("size"), aspectRatio)
+		resolution := xaiImagesResolution(c.PostForm("resolution"), c.PostForm("size"), "")
+		n := parseIntField(c.PostForm("n"), 0)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
+		return
+	}
+
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
 
@@ -478,6 +494,27 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+
+	if isXAIImagesModel(imageModel) {
+		responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+		if responseFormat == "" {
+			responseFormat = "b64_json"
+		}
+		images := collectXAIImagesFromJSON(rawJSON)
+		if len(images) == 0 {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Invalid request: image is required",
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		aspectRatio, resolution, n := xaiImagesEditOptionsFromJSON(rawJSON)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", gjson.GetBytes(rawJSON, "stream").Bool())
 		return
 	}
 

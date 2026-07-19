@@ -14,6 +14,11 @@ func TestGetXAIModelsAndAliases(t *testing.T) {
 	if model == nil || model.OwnedBy != "xai" || model.Type != "xai" {
 		t.Fatalf("grok-4.5 metadata = %#v", model)
 	}
+	for _, id := range []string{xaiBuiltinImageModelID, xaiBuiltinImageQualityModelID, xaiBuiltinVideoModelID} {
+		if findModelInfo(models, id) == nil {
+			t.Fatalf("missing xAI builtin model %s", id)
+		}
+	}
 }
 
 func TestDetectChangedProvidersIncludesXAI(t *testing.T) {
