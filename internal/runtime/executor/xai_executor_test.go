@@ -1419,3 +1419,58 @@ func TestXAIExecutorExecuteImagesRewritesImageURLToURL(t *testing.T) {
 		t.Fatalf("upstream body still has image.image_url: %s", gotBody)
 	}
 }
+
+func TestNormalizeXAIToolsSimplifiesAutomationAndPreservesSimpleSchemas(t *testing.T) {
+	large := `{"type":"object","oneOf":[{"required":["action"]}],"$defs":{"action":{"type":"string"}},"$ref":"#/$defs/action","padding":"` + strings.Repeat("x", 1800) + `"}`
+	body := []byte(`{"tools":[
+		{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","strict":true,"parameters":` + large + `}]},
+		{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}
+	]}`)
+	out := normalizeXAITools(body)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), out)
+	}
+	automation := tools[0]
+	if automation.Get("name").String() != "codex_app__automation_update" {
+		t.Fatalf("automation name = %q, want qualified name; body=%s", automation.Get("name").String(), out)
+	}
+	if automation.Get("strict").Type != gjson.False || automation.Get("parameters.additionalProperties").Type != gjson.True {
+		t.Fatalf("automation schema was not relaxed: %s", automation.Raw)
+	}
+	if automation.Get("parameters.oneOf").Exists() || automation.Get("parameters.$defs").Exists() || automation.Get("parameters.$ref").Exists() {
+		t.Fatalf("automation schema was not simplified: %s", automation.Raw)
+	}
+	lookup := tools[1]
+	if lookup.Get("parameters.properties.query.type").String() != "string" || lookup.Get("parameters.required.0").String() != "query" {
+		t.Fatalf("simple schema changed unexpectedly: %s", lookup.Raw)
+	}
+}
+
+func TestNormalizeXAIToolsAddsObjectTypesToRootUnions(t *testing.T) {
+	body := []byte(`{"tools":[
+		{"type":"function","name":"crop","strict":true,"parameters":{"type":"object","oneOf":[{"required":["radius"]},{"required":["size"]}],"properties":{"radius":{"type":"number"},"size":{"type":"object"}}}},
+		{"type":"custom","name":"lookup","parameters":{"type":"object","anyOf":[{"required":["query"]},{"required":["id"]}],"properties":{"query":{"type":"string"},"id":{"type":"integer"}}}}
+	]}`)
+	out := normalizeXAITools(body)
+	for _, path := range []string{"tools.0.parameters.oneOf.0.type", "tools.0.parameters.oneOf.1.type", "tools.1.parameters.anyOf.0.type", "tools.1.parameters.anyOf.1.type"} {
+		if got := gjson.GetBytes(out, path).String(); got != "object" {
+			t.Fatalf("%s = %q, want object; body=%s", path, got, out)
+		}
+	}
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != xaiFunctionToolType {
+		t.Fatalf("custom tool type = %q, want function; body=%s", got, out)
+	}
+}
+
+func TestXAIFunctionParametersNeedSimplificationNoOpCases(t *testing.T) {
+	if !xaiFunctionParametersNeedSimplification(gjson.Parse(`{"type":"function","name":"automation_update"}`), "codex_app") {
+		t.Fatal("codex_app automation_update should be simplified")
+	}
+	if xaiFunctionParametersNeedSimplification(gjson.Parse(`{"type":"function","name":"automation_update"}`), "calendar") {
+		t.Fatal("automation_update outside codex_app should be preserved")
+	}
+	if xaiFunctionParametersNeedSimplification(gjson.Parse(`{"type":"function","name":"lookup","parameters":{"type":"object","oneOf":[{"type":"object"},{"type":["object"]}]}}`), "") {
+		t.Fatal("object-only union should be preserved")
+	}
+}
