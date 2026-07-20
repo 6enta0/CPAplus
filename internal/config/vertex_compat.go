@@ -49,7 +49,7 @@ type VertexCompatModel struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Alias is the model name alias that clients will use to reference this model.
-	Alias string `yaml:"alias" json:"alias"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 }
 
 func (m VertexCompatModel) GetName() string  { return m.Name }

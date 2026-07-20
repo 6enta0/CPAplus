@@ -444,7 +444,7 @@ type ClaudeModel struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Alias is the client-facing model name that maps to Name.
-	Alias string `yaml:"alias" json:"alias"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string  { return m.Name }
@@ -492,7 +492,7 @@ type CodexModel struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Alias is the client-facing model name that maps to Name.
-	Alias string `yaml:"alias" json:"alias"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 }
 
 func (m CodexModel) GetName() string  { return m.Name }
@@ -542,7 +542,7 @@ type GeminiModel struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Alias is the client-facing model name that maps to Name.
-	Alias string `yaml:"alias" json:"alias"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 }
 
 func (m GeminiModel) GetName() string  { return m.Name }
@@ -602,7 +602,7 @@ type OpenAICompatibilityModel struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Alias is the model name alias that clients will use to reference this model.
-	Alias string `yaml:"alias" json:"alias"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
