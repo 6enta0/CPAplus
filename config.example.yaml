@@ -163,6 +163,7 @@ nonstream-keepalive-interval: 0
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
+#     name: "Gemini primary" # optional: human-readable label shown in usage statistics
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
@@ -182,6 +183,7 @@ nonstream-keepalive-interval: 0
 # Native Google Interactions API keys
 # interactions-api-key:
 #   - api-key: "AIzaSy...01"
+#     name: "Interactions primary" # optional: human-readable label shown in usage statistics
 #     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview"
 #     base-url: "https://generativelanguage.googleapis.com"
 #     proxy-url: "socks5://proxy.example.com:1080"
@@ -196,6 +198,7 @@ nonstream-keepalive-interval: 0
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
+#     name: "Codex team" # optional: human-readable label shown in usage statistics
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
@@ -214,6 +217,7 @@ nonstream-keepalive-interval: 0
 # Native xAI API keys
 # xai-api-key:
 #   - api-key: "xai-..."
+#     name: "xAI production" # optional: human-readable label shown in usage statistics
 #     priority: 1 # optional: higher values are selected first
 #     prefix: "grok" # optional: require calls like "grok/grok-4.5"
 #     base-url: "https://api.x.ai/v1"
@@ -230,6 +234,7 @@ nonstream-keepalive-interval: 0
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
+#     name: "Claude primary" # optional: human-readable label shown in usage statistics
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -314,6 +319,7 @@ nonstream-keepalive-interval: 0
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
+#     name: "Vertex-compatible"                   # optional: human-readable label shown in usage statistics
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override

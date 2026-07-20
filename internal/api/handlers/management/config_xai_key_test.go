@@ -24,7 +24,7 @@ func TestPatchXAIKeyUpdatesV6ExecutionFields(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/xai-api-key", strings.NewReader(`{
-		"index":0,"value":{"priority":7,"websockets":false,"prefix":"team"}
+		"index":0,"value":{"name":" Team xAI ","priority":7,"websockets":false,"prefix":"team"}
 	}`))
 	ctx.Request.Header.Set("Content-Type", "application/json")
 	handler.PatchXAIKey(ctx)
@@ -32,7 +32,7 @@ func TestPatchXAIKeyUpdatesV6ExecutionFields(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	entry := handler.cfg.XAIKey[0]
-	if entry.Priority != 7 || entry.Websockets || entry.Prefix != "team" {
+	if entry.Name != "Team xAI" || entry.Priority != 7 || entry.Websockets || entry.Prefix != "team" {
 		t.Fatalf("updated entry = %#v", entry)
 	}
 }

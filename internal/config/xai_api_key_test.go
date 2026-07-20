@@ -9,7 +9,8 @@ import (
 func TestParseConfigBytesXAIAPIKeyMatchesV6CodexShape(t *testing.T) {
 	var cfg Config
 	errParse := yaml.Unmarshal([]byte(`xai-api-key:
-  - api-key: " xai-key "
+  - name: " Team xAI "
+    api-key: " xai-key "
     priority: 3
     prefix: " team-xai "
     base-url: " https://api.x.ai/v1 "
@@ -33,6 +34,9 @@ func TestParseConfigBytesXAIAPIKeyMatchesV6CodexShape(t *testing.T) {
 		t.Fatalf("xai-api-key count = %d, want 1", len(cfg.XAIKey))
 	}
 	entry := cfg.XAIKey[0]
+	if entry.Name != "Team xAI" {
+		t.Fatalf("name = %q, want Team xAI", entry.Name)
+	}
 	if entry.APIKey != " xai-key " {
 		t.Fatalf("api-key = %q, want original v6 Codex-compatible value", entry.APIKey)
 	}
