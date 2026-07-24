@@ -667,47 +667,50 @@ func TestManager_SchedulerSeesCooldownWrittenWithThinkingSuffix(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	registerSchedulerModels(t, "gemini", "test-model", "auth-a", "auth-b")
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
-		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	cooledID := "suffix-cool-" + t.Name()
+	readyID := "suffix-ready-" + t.Name()
+	model := "suffix-model-" + t.Name()
+	registerSchedulerModels(t, "gemini", model, cooledID, readyID)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: cooledID, Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(cooled) error = %v", errRegister)
 	}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
-		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: readyID, Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(ready) error = %v", errRegister)
 	}
-	manager.RefreshSchedulerEntry("auth-a")
-	manager.RefreshSchedulerEntry("auth-b")
+	manager.RefreshSchedulerEntry(cooledID)
+	manager.RefreshSchedulerEntry(readyID)
 
 	manager.MarkResult(context.Background(), Result{
-		AuthID:   "auth-a",
+		AuthID:   cooledID,
 		Provider: "gemini",
-		Model:    "test-model(high)",
+		Model:    model + "(high)",
 		Success:  false,
 		Error:    &Error{HTTPStatus: 429, Message: "quota"},
 	})
 
 	manager.mu.RLock()
-	authA := manager.auths["auth-a"]
+	authA := manager.auths[cooledID]
 	if authA == nil {
 		manager.mu.RUnlock()
-		t.Fatal("auth-a missing after MarkResult")
+		t.Fatal("cooled auth missing after MarkResult")
 	}
-	if _, ok := authA.ModelStates["test-model"]; !ok {
+	if _, ok := authA.ModelStates[model]; !ok {
 		manager.mu.RUnlock()
-		t.Fatalf("ModelStates keys = %v, want canonical key %q", authA.ModelStates, "test-model")
+		t.Fatalf("ModelStates keys = %v, want canonical key %q", authA.ModelStates, model)
 	}
-	if _, ok := authA.ModelStates["test-model(high)"]; ok {
+	if _, ok := authA.ModelStates[model+"(high)"]; ok {
 		manager.mu.RUnlock()
-		t.Fatalf("ModelStates still has suffix key %q", "test-model(high)")
+		t.Fatalf("ModelStates still has suffix key %q", model+"(high)")
 	}
 	manager.mu.RUnlock()
 
-	for _, model := range []string{"test-model", "test-model(high)", "test-model(low)"} {
-		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	for _, requestModel := range []string{model, model + "(high)", model + "(low)"} {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", requestModel, cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
-			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown error = %v", model, errPick)
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown error = %v", requestModel, errPick)
 		}
-		if got == nil || got.ID != "auth-b" {
-			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown auth = %v, want auth-b", model, got)
+		if got == nil || got.ID != readyID {
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown auth = %v, want %q", requestModel, got, readyID)
 		}
 	}
 }
@@ -997,5 +1000,39 @@ func TestSchedulerMixedWeightsIgnoreDisallowedFreeAuths(t *testing.T) {
 		if providers[i] != want[i] {
 			t.Fatalf("providers = %v, want %v (free must not inflate codex weight)", providers, want)
 		}
+	}
+}
+
+func TestSchedulerPickMixed_PrefersWebsocketAcrossProviders(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "claude-a", Provider: "claude"},
+	)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	// With equal ready counts and WS preference on codex, codex should still participate
+	// and prefer websocket-enabled auth when codex is selected.
+	seenCodex := map[string]int{}
+	for i := 0; i < 6; i++ {
+		got, provider, err := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if err != nil {
+			t.Fatalf("pickMixed #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed #%d auth = nil", i)
+		}
+		if provider == "codex" {
+			seenCodex[got.ID]++
+		}
+	}
+	if seenCodex["codex-http"] != 0 {
+		t.Fatalf("expected websocket preference to skip codex-http, got counts %v", seenCodex)
+	}
+	if seenCodex["codex-ws"] == 0 {
+		t.Fatalf("expected codex-ws to be selected, got counts %v", seenCodex)
 	}
 }

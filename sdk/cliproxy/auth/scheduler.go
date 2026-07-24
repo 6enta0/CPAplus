@@ -379,6 +379,8 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 	predicate := selectionPredicate(tried, pinnedAuthID, disallowFreeAuth)
 	candidateShards := make([]*modelScheduler, len(normalized))
+	preferWebsocketByProvider := make([]bool, len(normalized))
+	downstreamWS := cliproxyexecutor.DownstreamWebsocket(ctx) && pinnedAuthID == ""
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
@@ -392,7 +394,9 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		preferWS := downstreamWS && providerPrefersWebsocketTransport(providerKey)
+		preferWebsocketByProvider[providerIndex] = preferWS
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWS, predicate)
 		if !okPriority {
 			continue
 		}
@@ -411,7 +415,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -427,7 +431,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, predicate)
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, predicate)
 		}
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
@@ -465,7 +469,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, schedulerStrategyRoundRobin, predicate)
 		if picked == nil {
 			continue
 		}
