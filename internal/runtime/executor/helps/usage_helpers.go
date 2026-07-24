@@ -3,17 +3,24 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// maxUsageErrorMessageRunes caps error text stored in usage statistics.
+const maxUsageErrorMessageRunes = 300
 
 type UsageReporter struct {
 	provider    string
@@ -51,18 +58,18 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, nil)
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
-	record, ok := r.buildAdditionalModelRecord(model, detail)
+	record, ok := r.buildAdditionalModelRecord(ctx, model, detail)
 	if !ok {
 		return
 	}
 	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
+func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model string, detail usage.Detail) (usage.Record, bool) {
 	if r == nil {
 		return usage.Record{}, false
 	}
@@ -74,11 +81,17 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false), true
+	return r.buildRecordForModel(ctx, model, detail, false, nil), true
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+// PublishFailure records a failed usage outcome.
+// Optional err values improve status-code/error-message capture when available.
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	var err error
+	if len(errs) > 0 {
+		err = errs[0]
+	}
+	r.publishWithOutcome(ctx, usage.Detail{}, true, err)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -86,17 +99,17 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, err error) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed, err))
 	})
 }
 
@@ -127,35 +140,125 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, nil))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, err error) usage.Record {
 	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
+		status, message := resolveClientExitOutcome(ctx, failed, err)
+		return usage.Record{
+			Detail:       detail,
+			Failed:       failed,
+			StatusCode:   status,
+			ErrorMessage: message,
+		}
 	}
-	return r.buildRecordForModel(r.model, detail, failed)
+	return r.buildRecordForModel(ctx, r.model, detail, failed, err)
 }
 
-func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool, err error) usage.Record {
+	status, message := resolveClientExitOutcome(ctx, failed, err)
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed}
+		return usage.Record{
+			Model:        model,
+			Detail:       detail,
+			Failed:       failed,
+			StatusCode:   status,
+			ErrorMessage: message,
+		}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Alias:       r.alias,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:     r.provider,
+		Model:        model,
+		Alias:        r.alias,
+		Source:       r.source,
+		APIKey:       r.apiKey,
+		AuthID:       r.authID,
+		AuthIndex:    r.authIndex,
+		AuthType:     r.authType,
+		RequestedAt:  r.requestedAt,
+		Latency:      r.latency(),
+		Failed:       failed,
+		StatusCode:   status,
+		ErrorMessage: message,
+		Detail:       detail,
 	}
+}
+
+// resolveClientExitOutcome estimates the HTTP status/message returned to the client.
+// Prefer error StatusCode()/HTTPStatusCode() when present, then the request context
+// status holder. A failed request with no concrete status remains unknown.
+func resolveClientExitOutcome(ctx context.Context, failed bool, err error) (statusCode int, errorMessage string) {
+	if err != nil {
+		errorMessage = summarizeUsageError(err)
+		if sc, ok := statusCodeFromError(err); ok {
+			statusCode = sc
+		}
+	}
+	if statusCode <= 0 {
+		statusCode = logging.GetResponseStatus(ctx)
+	}
+	if statusCode <= 0 && !failed {
+		statusCode = http.StatusOK
+	}
+	if !failed || (statusCode > 0 && statusCode < http.StatusBadRequest) {
+		errorMessage = ""
+	}
+	return statusCode, errorMessage
+}
+
+func statusCodeFromError(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	type statusCoder interface{ StatusCode() int }
+	var sc statusCoder
+	if errors.As(err, &sc) {
+		if code := sc.StatusCode(); code > 0 {
+			return code, true
+		}
+	}
+	type httpStatusCoder interface{ HTTPStatusCode() int }
+	var httpSC httpStatusCoder
+	if errors.As(err, &httpSC) {
+		if code := httpSC.HTTPStatusCode(); code > 0 {
+			return code, true
+		}
+	}
+	return 0, false
+}
+
+func summarizeUsageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	if raw == "" {
+		return ""
+	}
+	// Prefer structured JSON error.message when the error body is raw upstream JSON.
+	if msg := extractJSONErrorMessage([]byte(raw)); msg != "" {
+		raw = msg
+	} else {
+		raw = SummarizeErrorBody("", []byte(raw))
+	}
+	raw = strings.Join(strings.Fields(raw), " ")
+	return truncateRunes(raw, maxUsageErrorMessageRunes)
+}
+
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 || s == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > limit {
+		return string(runes[:limit])
+	}
+	return s
 }
 
 func (r *UsageReporter) latency() time.Duration {

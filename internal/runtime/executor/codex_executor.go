@@ -581,7 +581,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := gjson.GetBytes(data, "type").String()
 				if terminalErr, ok := codexTerminalFailureErr(data); ok {
 					helps.RecordAPIResponseError(ctx, e.cfg, terminalErr)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailure(ctx, terminalErr)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: terminalErr}:
 					case <-ctx.Done():
@@ -622,7 +622,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-		reporter.PublishFailure(ctx)
+		reporter.PublishFailure(ctx, streamErr)
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 		case <-ctx.Done():

@@ -79,3 +79,42 @@ func TestSnapshotRangeFiltersDetailsAndRebuildsTotals(t *testing.T) {
 		t.Fatalf("tokens by hour = %d, want 22", snapshot.TokensByHour["11"])
 	}
 }
+
+func TestUsageOutcomeDetailsSurviveSnapshotAndImport(t *testing.T) {
+	prevEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(true)
+	defer SetStatisticsEnabled(prevEnabled)
+
+	stats := NewRequestStatistics()
+	timestamp := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:       "api-a",
+		Model:        "model-a",
+		RequestedAt:  timestamp,
+		Failed:       true,
+		StatusCode:   429,
+		ErrorMessage: "rate limited",
+		Detail:       coreusage.Detail{TotalTokens: 1},
+	})
+
+	snapshot := stats.Snapshot()
+	detail := snapshot.APIs["api-a"].Models["model-a"].Details[0]
+	if detail.StatusCode != 429 || detail.ErrorMessage != "rate limited" {
+		t.Fatalf("snapshot outcome = (%d, %q), want (429, rate limited)", detail.StatusCode, detail.ErrorMessage)
+	}
+
+	result := stats.MergeSnapshot(StatisticsSnapshot{APIs: map[string]APISnapshot{
+		"api-a": {Models: map[string]ModelSnapshot{
+			"model-a": {Details: []RequestDetail{{
+				Timestamp:    timestamp,
+				Failed:       true,
+				StatusCode:   503,
+				ErrorMessage: "upstream unavailable",
+				Tokens:       TokenStats{TotalTokens: 1},
+			}}},
+		}},
+	}})
+	if result.Added != 1 || result.Skipped != 0 {
+		t.Fatalf("merge result = %+v, want one distinct outcome added", result)
+	}
+}

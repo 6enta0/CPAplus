@@ -67,13 +67,27 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		failed = !resolveSuccess(ctx)
 	}
 
+	statusCode := record.StatusCode
+	if statusCode <= 0 {
+		statusCode = internallogging.GetResponseStatus(ctx)
+	}
+	if statusCode <= 0 && !failed {
+		statusCode = 200
+	}
+	errorMessage := strings.TrimSpace(record.ErrorMessage)
+	if !failed || (statusCode > 0 && statusCode < httpStatusBadRequest) {
+		errorMessage = ""
+	}
+
 	detail := requestDetail{
-		Timestamp: timestamp,
-		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    tokens,
-		Failed:    failed,
+		Timestamp:    timestamp,
+		LatencyMs:    record.Latency.Milliseconds(),
+		Source:       record.Source,
+		AuthIndex:    record.AuthIndex,
+		Tokens:       tokens,
+		Failed:       failed,
+		StatusCode:   statusCode,
+		ErrorMessage: errorMessage,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
@@ -104,12 +118,14 @@ type queuedUsageDetail struct {
 }
 
 type requestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp    time.Time  `json:"timestamp"`
+	LatencyMs    int64      `json:"latency_ms"`
+	Source       string     `json:"source"`
+	AuthIndex    string     `json:"auth_index"`
+	Tokens       tokenStats `json:"tokens"`
+	Failed       bool       `json:"failed"`
+	StatusCode   int        `json:"status_code,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
 }
 
 type tokenStats struct {

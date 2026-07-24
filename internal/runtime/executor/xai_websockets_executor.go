@@ -612,7 +612,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				terminateReason = "read_error"
 				terminateErr = newXAIIncompleteStreamError()
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, terminateErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: terminateErr})
 				return
 			}
@@ -622,7 +622,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					terminateReason = "unexpected_binary"
 					terminateErr = errBinary
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", errBinary)
-					reporter.PublishFailure(ctx)
+					reporter.PublishFailure(ctx, errBinary)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 					}
@@ -642,7 +642,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, wsErr)
 				statusCode := http.StatusInternalServerError
 				if status, okStatus := wsErr.(interface{ StatusCode() int }); okStatus {
 					statusCode = status.StatusCode()

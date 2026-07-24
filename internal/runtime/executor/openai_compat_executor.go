@@ -423,7 +423,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errProcess != nil {
 			stopBootstrapTimer()
 			helps.RecordAPIResponseError(ctx, e.cfg, errProcess)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailure(ctx, errProcess)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
@@ -442,12 +442,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			timeoutErr := newOpenAICompatBootstrapTimeoutStatusErr(bootstrapTimeout)
 			helps.RecordAPIResponseError(ctx, e.cfg, timeoutErr)
 			helps.LogWithRequestID(ctx).Warnf("openai compat executor: bootstrap timeout before first payload after %s", bootstrapTimeout)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailure(ctx, timeoutErr)
 			return nil, timeoutErr
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailure(ctx, errScan)
 			return nil, errScan
 		}
 		// In case the upstream close the stream without a terminal [DONE] marker.
@@ -475,7 +475,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			chunks, errProcess := processLine(scanner.Bytes())
 			if errProcess != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errProcess)
-				reporter.PublishFailure(ctx)
+				reporter.PublishFailure(ctx, errProcess)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: errProcess}:
 				case <-ctx.Done():
@@ -492,7 +492,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx)
+			reporter.PublishFailure(ctx, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():

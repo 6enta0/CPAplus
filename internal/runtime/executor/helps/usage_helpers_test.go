@@ -154,12 +154,15 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false, nil)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+	if record.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", record.StatusCode)
 	}
 }
 
@@ -167,7 +170,7 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false, nil)
 	if record.Model != "gpt-5.4" {
 		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
 	}
@@ -182,14 +185,15 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 		model:       "gpt-5.4",
 		requestedAt: time.Now(),
 	}
+	ctx := context.Background()
 
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{}); ok {
+	if _, ok := reporter.buildAdditionalModelRecord(ctx, "gpt-image-2", usage.Detail{}); ok {
 		t.Fatalf("expected all-zero token usage to be skipped")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(ctx, "gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(ctx, "gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
 	}
 }

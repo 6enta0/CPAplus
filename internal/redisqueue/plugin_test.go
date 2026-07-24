@@ -46,6 +46,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireBoolField(t, payload, "failed", false)
+		requireIntField(t, payload, "status_code", http.StatusOK)
 	})
 }
 
@@ -58,15 +59,18 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:    "openai",
-			Model:       "gpt-5.4-mini",
-			Alias:       "client-mini",
-			APIKey:      "test-key",
-			AuthIndex:   "0",
-			AuthType:    "apikey",
-			Source:      "user@example.com",
-			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:     2500 * time.Millisecond,
+			Provider:     "openai",
+			Model:        "gpt-5.4-mini",
+			Alias:        "client-mini",
+			APIKey:       "test-key",
+			AuthIndex:    "0",
+			AuthType:     "apikey",
+			Source:       "user@example.com",
+			RequestedAt:  time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:      2500 * time.Millisecond,
+			Failed:       true,
+			StatusCode:   http.StatusTooManyRequests,
+			ErrorMessage: "rate limited",
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -82,6 +86,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "request_id", "gin-request-id")
 		requireBoolField(t, payload, "failed", true)
+		requireIntField(t, payload, "status_code", http.StatusTooManyRequests)
+		requireStringField(t, payload, "error_message", "rate limited")
 	})
 }
 
@@ -211,6 +217,22 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	}
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
+	}
+}
+
+func requireIntField(t *testing.T, payload map[string]json.RawMessage, key string, want int) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got int
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d", key, got, want)
 	}
 }
 

@@ -91,7 +91,11 @@ type RequestDetail struct {
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
-	CostUSD   float64    `json:"cost_usd"`
+	// StatusCode is the HTTP status returned to the client. 0 means unknown/legacy.
+	StatusCode int `json:"status_code,omitempty"`
+	// ErrorMessage is a short failure summary for non-2xx outcomes.
+	ErrorMessage string  `json:"error_message,omitempty"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 type TokenStats struct {
@@ -182,6 +186,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if !failed {
 		failed = !resolveSuccess(ctx)
 	}
+	statusCode, errorMessage := resolveClientExitFields(ctx, record, failed)
 	success := !failed
 	modelName := record.Model
 	if modelName == "" {
@@ -207,12 +212,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:    timestamp,
+		LatencyMs:    normaliseLatency(record.Latency),
+		Source:       record.Source,
+		AuthIndex:    record.AuthIndex,
+		Tokens:       detail,
+		Failed:       failed,
+		StatusCode:   statusCode,
+		ErrorMessage: errorMessage,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -480,8 +487,10 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 				ReasoningTokens: detail.Tokens.ReasoningTokens,
 				TotalTokens:     detail.Tokens.TotalTokens,
 			},
-			Latency: time.Duration(detail.LatencyMs) * time.Millisecond,
-			Failed:  detail.Failed,
+			Latency:      time.Duration(detail.LatencyMs) * time.Millisecond,
+			Failed:       detail.Failed,
+			StatusCode:   detail.StatusCode,
+			ErrorMessage: detail.ErrorMessage,
 		})
 	}
 }
@@ -490,13 +499,15 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%s|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
+		detail.StatusCode,
+		detail.ErrorMessage,
 		tokens.InputTokens,
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
@@ -523,6 +534,21 @@ func resolveSuccess(ctx context.Context) bool {
 		return true
 	}
 	return status < httpStatusBadRequest
+}
+
+func resolveClientExitFields(ctx context.Context, record coreusage.Record, failed bool) (statusCode int, errorMessage string) {
+	statusCode = record.StatusCode
+	if statusCode <= 0 && ctx != nil {
+		statusCode = internallogging.GetResponseStatus(ctx)
+	}
+	if statusCode <= 0 && !failed {
+		statusCode = 200
+	}
+	errorMessage = strings.TrimSpace(record.ErrorMessage)
+	if !failed || (statusCode > 0 && statusCode < httpStatusBadRequest) {
+		errorMessage = ""
+	}
+	return statusCode, errorMessage
 }
 
 const httpStatusBadRequest = 400

@@ -19,7 +19,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const usageSchemaVersion = 4
+const usageSchemaVersion = 5
 
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS usage_records (
@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS usage_records (
 	timestamp        TEXT    NOT NULL,
 	latency_ms       INTEGER NOT NULL DEFAULT 0,
 	failed           INTEGER NOT NULL DEFAULT 0,
+	status_code      INTEGER NOT NULL DEFAULT 0,
+	error_message    TEXT    NOT NULL DEFAULT '',
 	input_tokens     INTEGER NOT NULL DEFAULT 0,
 	output_tokens    INTEGER NOT NULL DEFAULT 0,
 	reasoning_tokens INTEGER NOT NULL DEFAULT 0,
@@ -183,23 +185,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 	db.SetMaxOpenConns(1)
 
-	if needsRebuild, _ := checkSchemaVersion(db, usageSchemaVersion); needsRebuild {
-		log.Warn("usage db: schema version mismatch, rebuilding tables (historical data will be lost)")
-		if _, err = db.Exec("DROP TABLE IF EXISTS usage_records"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("failed to drop old usage_records: %w", err)
-		}
-		if _, err = db.Exec("DROP TABLE IF EXISTS usage_schema_meta"); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("failed to drop old usage_schema_meta: %w", err)
-		}
-	}
-
 	if _, err = db.Exec(createTableSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to init usage db schema: %w", err)
 	}
-
+	if err = migrateUsageRecordOutcomeColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to migrate usage db schema: %w", err)
+	}
 	if err = setSchemaVersion(db, usageSchemaVersion); err != nil {
 		log.WithError(err).Warn("usage db: failed to persist schema version")
 	}
@@ -262,9 +255,18 @@ func (s *SQLiteStore) InsertRecord(record coreusage.Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	statusCode := record.StatusCode
+	if statusCode < 0 {
+		statusCode = 0
+	}
+	errorMessage := strings.TrimSpace(record.ErrorMessage)
+	if !record.Failed || (statusCode > 0 && statusCode < 400) {
+		errorMessage = ""
+	}
+
 	_, err := s.db.Exec(
-		`INSERT INTO usage_records (api_key, model, source, auth_index, timestamp, latency_ms, failed, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_usd)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO usage_records (api_key, model, source, auth_index, timestamp, latency_ms, failed, status_code, error_message, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_usd)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		apiKey,
 		model,
 		record.Source,
@@ -272,6 +274,8 @@ func (s *SQLiteStore) InsertRecord(record coreusage.Record) {
 		timestamp.UTC().Format(time.RFC3339Nano),
 		normaliseLatency(record.Latency),
 		failed,
+		statusCode,
+		errorMessage,
 		record.Detail.InputTokens,
 		record.Detail.OutputTokens,
 		record.Detail.ReasoningTokens,
@@ -528,7 +532,7 @@ func (s *SQLiteStore) LoadAll() ([]loadedRecord, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT api_key, model, source, auth_index, timestamp, latency_ms, failed, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_usd FROM usage_records ORDER BY id ASC`,
+		`SELECT api_key, model, source, auth_index, timestamp, latency_ms, failed, status_code, error_message, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_usd FROM usage_records ORDER BY id ASC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("usage db: query failed: %w", err)
@@ -542,7 +546,7 @@ func (s *SQLiteStore) LoadAll() ([]loadedRecord, error) {
 		var failed int
 		if err := rows.Scan(
 			&r.APIKey, &r.Model, &r.Source, &r.AuthIndex,
-			&timestampStr, &r.LatencyMs, &failed,
+			&timestampStr, &r.LatencyMs, &failed, &r.StatusCode, &r.ErrorMessage,
 			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens, &r.TotalTokens,
 			&r.CostUSD,
 		); err != nil {
@@ -566,6 +570,8 @@ type loadedRecord struct {
 	Timestamp       time.Time
 	LatencyMs       int64
 	Failed          bool
+	StatusCode      int
+	ErrorMessage    string
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
@@ -589,13 +595,15 @@ func (r loadedRecord) ToRequestDetail() RequestDetail {
 		tokens.TotalTokens = r.InputTokens + r.OutputTokens + r.ReasoningTokens + r.CachedTokens
 	}
 	return RequestDetail{
-		Timestamp: r.Timestamp,
-		LatencyMs: r.LatencyMs,
-		Source:    r.Source,
-		AuthIndex: r.AuthIndex,
-		Tokens:    tokens,
-		Failed:    r.Failed,
-		CostUSD:   r.CostUSD,
+		Timestamp:    r.Timestamp,
+		LatencyMs:    r.LatencyMs,
+		Source:       r.Source,
+		AuthIndex:    r.AuthIndex,
+		Tokens:       tokens,
+		Failed:       r.Failed,
+		StatusCode:   r.StatusCode,
+		ErrorMessage: r.ErrorMessage,
+		CostUSD:      r.CostUSD,
 	}
 }
 
@@ -738,12 +746,59 @@ func (s *SQLiteStore) ExportSnapshot() (StatisticsSnapshot, error) {
 	return stats.Snapshot(), nil
 }
 
-func checkSchemaVersion(db *sql.DB, expected int) (needsRebuild bool, current int) {
-	row := db.QueryRow("SELECT version FROM usage_schema_meta LIMIT 1")
-	if err := row.Scan(&current); err != nil {
-		return true, 0
+func migrateUsageRecordOutcomeColumns(db *sql.DB) error {
+	if db == nil {
+		return nil
 	}
-	return current != expected, current
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin usage outcome migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`PRAGMA table_info(usage_records)`)
+	if err != nil {
+		return fmt.Errorf("inspect usage_records columns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			columnID   int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			primaryKey int
+		)
+		if err = rows.Scan(&columnID, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return fmt.Errorf("scan usage_records column: %w", err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("iterate usage_records columns: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("close usage_records columns: %w", err)
+	}
+
+	if _, ok := columns["status_code"]; !ok {
+		if _, err = tx.Exec(`ALTER TABLE usage_records ADD COLUMN status_code INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add status_code column: %w", err)
+		}
+	}
+	if _, ok := columns["error_message"]; !ok {
+		if _, err = tx.Exec(`ALTER TABLE usage_records ADD COLUMN error_message TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add error_message column: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit usage outcome migration: %w", err)
+	}
+	return nil
 }
 
 func setSchemaVersion(db *sql.DB, version int) error {

@@ -22,7 +22,12 @@ type Record struct {
 	RequestedAt time.Time
 	Latency     time.Duration
 	Failed      bool
-	Detail      Detail
+	// StatusCode is the HTTP status ultimately returned to the client (proxy exit status).
+	// 0 means unknown/unset.
+	StatusCode int
+	// ErrorMessage is a short client-visible failure summary. Empty on success.
+	ErrorMessage string
+	Detail       Detail
 }
 
 // Detail holds the token usage breakdown.

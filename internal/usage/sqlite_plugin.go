@@ -18,13 +18,20 @@ func NewSQLitePlugin(store *SQLiteStore) *SQLitePlugin {
 	return &SQLitePlugin{store: store}
 }
 
-func (p *SQLitePlugin) HandleUsage(_ context.Context, record coreusage.Record) {
+func (p *SQLitePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil || p.store == nil {
 		return
 	}
 	if !statisticsEnabled.Load() {
 		return
 	}
+
+	failed := record.Failed
+	if !failed {
+		failed = !resolveSuccess(ctx)
+	}
+	record.Failed = failed
+	record.StatusCode, record.ErrorMessage = resolveClientExitFields(ctx, record, failed)
 	p.store.InsertRecord(record)
 }
 
