@@ -652,6 +652,51 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 	return models
 }
 
+// routeModelAvailability reports whether auth can execute routeModel right now.
+// For OpenAI-compat multi-upstream pools, the auth is available if at least one
+// upstream model is not blocked; MarkResult stores cooldowns under upstream keys.
+func (m *Manager) routeModelAvailability(auth *Auth, routeModel string, now time.Time) (blocked bool, reason blockReason, next time.Time) {
+	if auth == nil {
+		return true, blockReasonOther, time.Time{}
+	}
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = strings.TrimSpace(routeModel)
+	}
+	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 1 {
+		cooldownCount := 0
+		var earliest time.Time
+		anyReady := false
+		for _, upstream := range pool {
+			upstream = strings.TrimSpace(upstream)
+			if upstream == "" {
+				continue
+			}
+			upBlocked, upReason, upNext := isAuthBlockedForModel(auth, upstream, now)
+			if !upBlocked {
+				anyReady = true
+				continue
+			}
+			if upReason == blockReasonCooldown {
+				cooldownCount++
+				if !upNext.IsZero() && (earliest.IsZero() || upNext.Before(earliest)) {
+					earliest = upNext
+				}
+			}
+		}
+		if anyReady {
+			return false, blockReasonNone, time.Time{}
+		}
+		if cooldownCount > 0 && !earliest.IsZero() {
+			return true, blockReasonCooldown, earliest
+		}
+		return true, blockReasonOther, time.Time{}
+	}
+	checkModel := m.selectionModelForAuth(auth, routeModel)
+	return isAuthBlockedForModel(auth, checkModel, now)
+}
+
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -661,8 +706,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	cooldownCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
-		checkModel := m.selectionModelForAuth(candidate, routeModel)
-		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		blocked, reason, next := m.routeModelAvailability(candidate, routeModel, now)
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)

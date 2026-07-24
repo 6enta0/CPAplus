@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -752,5 +753,103 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 	}
 	if got := executor.StreamModels(); len(got) != 1 || got[0] != "deepseek-v3.1" {
 		t.Fatalf("stream calls = %v, want only first upstream model", got)
+	}
+}
+
+func TestManager_OpenAICompatPoolAllUpstreamsCooledSkipsAuth(t *testing.T) {
+	t.Parallel()
+
+	alias := "alias-model"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "upstream-a", Alias: alias},
+		{Name: "upstream-b", Alias: alias},
+	}, executor)
+
+	second := &Auth{
+		ID:       "pool-auth-second-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "pool",
+			"provider_key": "pool",
+			"api_key":      "k2",
+		},
+	}
+	if _, err := m.Register(context.Background(), second); err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(second.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() { reg.UnregisterClient(second.ID) })
+	m.RefreshSchedulerEntry(second.ID)
+
+	primaryID := "pool-auth-" + t.Name()
+	for _, upstream := range []string{"upstream-a", "upstream-b"} {
+		m.MarkResult(context.Background(), Result{
+			AuthID:   primaryID,
+			Provider: "pool",
+			Model:    upstream,
+			Success:  false,
+			Error:    &Error{HTTPStatus: 429, Message: "quota"},
+		})
+	}
+
+	available, err := m.availableAuthsForRouteModel(m.List(), "pool", alias, time.Now())
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel error = %v", err)
+	}
+	for _, auth := range available {
+		if auth.ID == primaryID {
+			t.Fatalf("primary auth %q still available after all upstreams cooled", primaryID)
+		}
+	}
+	if len(available) == 0 {
+		t.Fatal("expected second auth still available")
+	}
+}
+
+func TestManager_OpenAICompatPoolPartialUpstreamCooldownStillSelectable(t *testing.T) {
+	t.Parallel()
+
+	alias := "alias-partial"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "upstream-a", Alias: alias},
+		{Name: "upstream-b", Alias: alias},
+	}, executor)
+
+	primaryID := "pool-auth-" + t.Name()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   primaryID,
+		Provider: "pool",
+		Model:    "upstream-a",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	available, err := m.availableAuthsForRouteModel(m.List(), "pool", alias, time.Now())
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel error = %v", err)
+	}
+	found := false
+	var primary *Auth
+	for _, auth := range available {
+		if auth.ID == primaryID {
+			found = true
+			primary = auth
+		}
+	}
+	if !found || primary == nil {
+		t.Fatal("auth with one remaining ready upstream should still be selectable")
+	}
+	models := m.prepareExecutionModels(primary, alias)
+	if len(models) == 0 {
+		t.Fatal("prepareExecutionModels returned empty; expected remaining upstream")
+	}
+	for _, model := range models {
+		if model == "upstream-a" {
+			t.Fatalf("cooled upstream-a still in executable models: %v", models)
+		}
 	}
 }
