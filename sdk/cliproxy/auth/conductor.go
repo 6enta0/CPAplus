@@ -255,6 +255,16 @@ func (m *Manager) syncScheduler() {
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
+// refreshSchedulerOnPickMiss re-upserts auth snapshots without wiping mixed RR
+// cursors. Used when a scheduler pick fails in a way that may be caused by a
+// stale supportedModelSet rather than a true empty pool.
+func (m *Manager) refreshSchedulerOnPickMiss() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	m.scheduler.resync(m.snapshotAuths())
+}
+
 func (m *Manager) snapshotAuths() []*Auth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -3437,7 +3447,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+			m.refreshSchedulerOnPickMiss()
 			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {
@@ -3617,7 +3627,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+			m.refreshSchedulerOnPickMiss()
 			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {

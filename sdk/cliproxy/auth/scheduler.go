@@ -208,15 +208,38 @@ func (s *authScheduler) setSelector(selector Selector) {
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
+// Mixed-provider cursors are intentionally reset (selector/strategy changes).
 func (s *authScheduler) rebuild(auths []*Auth) {
+	s.rebuildWithOptions(auths, true)
+}
+
+// resync refreshes provider/auth/model readiness from a snapshot while preserving
+// mixed-provider rotation cursors. Per-model ready-view cursors are restored by
+// rebuildIndexesLocked during upsert.
+func (s *authScheduler) resync(auths []*Auth) {
+	s.rebuildWithOptions(auths, false)
+}
+
+func (s *authScheduler) rebuildWithOptions(auths []*Auth, resetMixedCursors bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	preservedMixed := s.mixedCursors
+	if resetMixedCursors || preservedMixed == nil {
+		preservedMixed = make(map[string]int)
+	} else {
+		// Shallow copy so concurrent picks after unlock cannot observe a half-built map.
+		copied := make(map[string]int, len(preservedMixed))
+		for key, value := range preservedMixed {
+			copied[key] = value
+		}
+		preservedMixed = copied
+	}
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
-	s.mixedCursors = make(map[string]int)
+	s.mixedCursors = preservedMixed
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)

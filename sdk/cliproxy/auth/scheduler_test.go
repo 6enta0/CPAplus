@@ -865,3 +865,57 @@ func TestManager_SessionAffinityPinsBoundAuthAndRebindsOnCooldown(t *testing.T) 
 		t.Fatalf("rebound session did not stick: third=%q fourth=%q", third.ID, fourth.ID)
 	}
 }
+
+func TestManager_PickMissRefreshPreservesMixedCursors(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+
+	for _, auth := range []*Auth{
+		{ID: "gemini-a", Provider: "gemini"},
+		{ID: "gemini-b", Provider: "gemini"},
+		{ID: "claude-a", Provider: "claude"},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	// Advance mixed rotation once so mixedCursors is non-zero.
+	if _, _, _, err := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil); err != nil {
+		t.Fatalf("warmup pickNextMixed error = %v", err)
+	}
+
+	manager.scheduler.mu.Lock()
+	var cursorBefore int
+	var cursorKey string
+	for key, value := range manager.scheduler.mixedCursors {
+		cursorKey = key
+		cursorBefore = value
+		break
+	}
+	manager.scheduler.mu.Unlock()
+	if cursorKey == "" || cursorBefore == 0 {
+		t.Fatalf("expected advanced mixed cursor, key=%q value=%d", cursorKey, cursorBefore)
+	}
+
+	// Soft refresh (pick-miss path) must preserve mixed cursors.
+	manager.refreshSchedulerOnPickMiss()
+
+	manager.scheduler.mu.Lock()
+	cursorAfter := manager.scheduler.mixedCursors[cursorKey]
+	manager.scheduler.mu.Unlock()
+	if cursorAfter != cursorBefore {
+		t.Fatalf("mixed cursor for %q = %d after refresh, want %d", cursorKey, cursorAfter, cursorBefore)
+	}
+
+	// Full rebuild still resets mixed cursors (selector/load paths).
+	manager.syncScheduler()
+	manager.scheduler.mu.Lock()
+	if len(manager.scheduler.mixedCursors) != 0 {
+		t.Fatalf("full syncScheduler should reset mixed cursors, got %v", manager.scheduler.mixedCursors)
+	}
+	manager.scheduler.mu.Unlock()
+}
