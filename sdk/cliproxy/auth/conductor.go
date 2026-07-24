@@ -220,8 +220,20 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	return manager
 }
 
+// unwrapSelector peels SessionAffinitySelector wrappers so built-in strategy
+// detection and the scheduler fast path still see RoundRobin/FillFirst.
+func unwrapSelector(selector Selector) Selector {
+	for {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil || affinity.fallback == nil {
+			return selector
+		}
+		selector = affinity.fallback
+	}
+}
+
 func isBuiltInSelector(selector Selector) bool {
-	switch selector.(type) {
+	switch unwrapSelector(selector).(type) {
 	case *RoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
@@ -686,6 +698,11 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
+	// Session affinity needs the real model for availability checks and cache keys.
+	// Only bare built-in selectors historically received a blank model arg.
+	if _, ok := selector.(*SessionAffinitySelector); ok {
+		return routeModel
+	}
 	if isBuiltInSelector(selector) {
 		return ""
 	}
@@ -3205,6 +3222,80 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
+func (m *Manager) sessionAffinitySelector() *SessionAffinitySelector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	affinity, _ := m.selector.(*SessionAffinitySelector)
+	return affinity
+}
+
+func optionsWithPinnedAuth(opts cliproxyexecutor.Options, authID string) cliproxyexecutor.Options {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return opts
+	}
+	out := opts
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	meta[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+	out.Metadata = meta
+	return out
+}
+
+func sessionAffinityCacheKey(provider, sessionID, model string) string {
+	provider = strings.TrimSpace(provider)
+	sessionID = strings.TrimSpace(sessionID)
+	if provider == "" || sessionID == "" {
+		return ""
+	}
+	modelKey := canonicalModelKey(model)
+	return provider + "::" + sessionID + "::" + modelKey
+}
+
+// prepareSessionAffinityPick returns pick options with an optional pin and the
+// cache key used to rebind after selection. Fast path keeps the scheduler; the
+// pin reuses sticky credentials without forcing the legacy selector path.
+func (m *Manager) prepareSessionAffinityPick(opts cliproxyexecutor.Options, provider, model string, tried map[string]struct{}) (cliproxyexecutor.Options, *SessionAffinitySelector, string) {
+	affinity := m.sessionAffinitySelector()
+	if affinity == nil || affinity.cache == nil {
+		return opts, nil, ""
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return opts, affinity, ""
+	}
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, model)
+	if cacheKey == "" {
+		return opts, affinity, ""
+	}
+	if authID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
+		if _, used := tried[authID]; !used {
+			return optionsWithPinnedAuth(opts, authID), affinity, cacheKey
+		}
+	}
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, model)
+		if authID, ok := affinity.cache.Get(fallbackKey); ok {
+			if _, used := tried[authID]; !used {
+				return optionsWithPinnedAuth(opts, authID), affinity, cacheKey
+			}
+		}
+	}
+	return opts, affinity, cacheKey
+}
+
+func bindSessionAffinity(affinity *SessionAffinitySelector, cacheKey, authID string) {
+	if affinity == nil || affinity.cache == nil || cacheKey == "" || strings.TrimSpace(authID) == "" {
+		return
+	}
+	affinity.cache.Set(cacheKey, authID)
+}
+
 func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
@@ -3337,11 +3428,17 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	strategyOverride := m.compatStrategyOverrideForProviders([]string{provider})
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	optsPick, affinity, affinityKey := m.prepareSessionAffinityPick(opts, provider, model, tried)
 	for {
-		selected, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
+		selected, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
+		if errPick != nil && pinnedAuthIDFromMetadata(optsPick.Metadata) != "" {
+			// Sticky auth unavailable: fall back to normal scheduler rotation and rebind.
+			optsPick = opts
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
+		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, errPick
@@ -3365,6 +3462,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 			m.mu.Unlock()
 		}
+		bindSessionAffinity(affinity, affinityKey, authCopy.ID)
 		return authCopy, executor, nil
 	}
 }
@@ -3511,11 +3609,16 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	optsPick, affinity, affinityKey := m.prepareSessionAffinityPick(opts, "mixed", model, tried)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
+		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
+		if errPick != nil && pinnedAuthIDFromMetadata(optsPick.Metadata) != "" {
+			optsPick = opts
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
+		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
@@ -3543,6 +3646,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 			m.mu.Unlock()
 		}
+		bindSessionAffinity(affinity, affinityKey, authCopy.ID)
 		return authCopy, executor, providerKey, nil
 	}
 }

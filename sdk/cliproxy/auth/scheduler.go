@@ -175,7 +175,7 @@ func newAuthScheduler(selector Selector) *authScheduler {
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
-	switch selector.(type) {
+	switch unwrapSelector(selector).(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case nil, *RoundRobinSelector:

@@ -751,3 +751,117 @@ func TestIsAuthBlockedForModel_LegacySuffixKeyVisibleViaCanonicalLookup(t *testi
 		t.Fatalf("migrated state lost cooldown: %+v", state)
 	}
 }
+
+func TestManager_SessionAffinityKeepsSchedulerMixedRotation(t *testing.T) {
+	t.Parallel()
+
+	// Weighted mixed rotation must remain active when session affinity wraps RR.
+	// gemini has 2 ready auths, claude has 1 → expected provider order gemini, claude, gemini, ...
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+
+	auths := []*Auth{
+		{ID: "gemini-a", Provider: "gemini"},
+		{ID: "gemini-b", Provider: "gemini"},
+		{ID: "claude-a", Provider: "claude"},
+	}
+	for _, auth := range auths {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	if !manager.useSchedulerFastPath() {
+		t.Fatal("useSchedulerFastPath() = false with session affinity over RoundRobin, want true")
+	}
+
+	// Weight = ready count: gemini=2, claude=1 → gemini, gemini, claude, gemini...
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	// Without session headers, picks should rotate via scheduler mixed weights.
+	for index := range wantProviders {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if provider != wantProviders[index] {
+			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
+		}
+		if got.ID != wantIDs[index] {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestManager_SessionAffinityPinsBoundAuthAndRebindsOnCooldown(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	registerSchedulerModels(t, "gemini", "test-model", "auth-a", "auth-b")
+
+	for _, id := range []string{"auth-a", "auth-b"} {
+		if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "gemini"}); err != nil {
+			t.Fatalf("Register(%s) error = %v", id, err)
+		}
+		manager.RefreshSchedulerEntry(id)
+	}
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "session-sticky-1")
+	opts := cliproxyexecutor.Options{Headers: headers}
+
+	first, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || first == nil {
+		t.Fatalf("first pickNext() auth=%v err=%v", first, errPick)
+	}
+	second, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || second == nil {
+		t.Fatalf("second pickNext() auth=%v err=%v", second, errPick)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("session affinity did not stick: first=%q second=%q", first.ID, second.ID)
+	}
+
+	// Cool down the sticky auth; next pick should rebind to the other credential.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   first.ID,
+		Provider: "gemini",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	third, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || third == nil {
+		t.Fatalf("third pickNext() after cooldown auth=%v err=%v", third, errPick)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("expected rebind after sticky cooldown, still got %q", third.ID)
+	}
+
+	fourth, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || fourth == nil {
+		t.Fatalf("fourth pickNext() auth=%v err=%v", fourth, errPick)
+	}
+	if fourth.ID != third.ID {
+		t.Fatalf("rebound session did not stick: third=%q fourth=%q", third.ID, fourth.ID)
+	}
+}
