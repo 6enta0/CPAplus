@@ -919,3 +919,83 @@ func TestManager_PickMissRefreshPreservesMixedCursors(t *testing.T) {
 	}
 	manager.scheduler.mu.Unlock()
 }
+
+func TestManager_DisallowFreeAuthDoesNotAdvanceCursor(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+	registerSchedulerModels(t, "codex", "gpt-5", "codex-free-a", "codex-free-b", "codex-paid")
+
+	for _, auth := range []*Auth{
+		{ID: "codex-free-a", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-free-b", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+		manager.RefreshSchedulerEntry(auth.ID)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DisallowFreeAuthMetadataKey: true,
+	}}
+
+	for i := 0; i < 5; i++ {
+		got, _, err := manager.pickNext(context.Background(), "codex", "gpt-5", opts, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("pickNext #%d error = %v", i, err)
+		}
+		if got == nil || got.ID != "codex-paid" {
+			t.Fatalf("pickNext #%d auth = %v, want codex-paid", i, got)
+		}
+	}
+}
+
+func TestSchedulerMixedWeightsIgnoreDisallowedFreeAuths(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+	registerSchedulerModels(t, "codex", "gpt-5", "codex-free-a", "codex-free-b", "codex-paid")
+	registerSchedulerModels(t, "claude", "gpt-5", "claude-a")
+
+	for _, auth := range []*Auth{
+		{ID: "codex-free-a", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-free-b", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}},
+		{ID: "claude-a", Provider: "claude"},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+		manager.RefreshSchedulerEntry(auth.ID)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DisallowFreeAuthMetadataKey: true,
+	}}
+
+	providers := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		got, _, provider, err := manager.pickNextMixed(context.Background(), []string{"codex", "claude"}, "gpt-5", opts, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("pickNextMixed #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed #%d auth = nil", i)
+		}
+		if provider == "codex" && got.ID != "codex-paid" {
+			t.Fatalf("pickNextMixed #%d selected free codex %q", i, got.ID)
+		}
+		providers = append(providers, provider)
+	}
+	want := []string{"codex", "claude", "codex", "claude"}
+	for i := range want {
+		if providers[i] != want[i] {
+			t.Fatalf("providers = %v, want %v (free must not inflate codex weight)", providers, want)
+		}
+	}
+}

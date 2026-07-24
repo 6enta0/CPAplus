@@ -298,20 +298,8 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	predicate := func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil {
-			return false
-		}
-		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
-			return false
-		}
-		if len(tried) > 0 {
-			if _, ok := tried[entry.auth.ID]; ok {
-				return false
-			}
-		}
-		return true
-	}
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	predicate := selectionPredicate(tried, pinnedAuthID, disallowFreeAuth)
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
@@ -388,7 +376,8 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := triedPredicate(tried)
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	predicate := selectionPredicate(tried, pinnedAuthID, disallowFreeAuth)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
@@ -438,7 +427,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, predicate)
 		}
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
@@ -523,15 +512,29 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 
 // triedPredicate builds a filter that excludes auths already attempted for the current request.
 func triedPredicate(tried map[string]struct{}) func(*scheduledAuth) bool {
-	if len(tried) == 0 {
-		return func(entry *scheduledAuth) bool { return entry != nil && entry.auth != nil }
-	}
+	return selectionPredicate(tried, "", false)
+}
+
+// selectionPredicate builds the hot-path filter for scheduler picks: exclude tried IDs,
+// optional pin, and free Codex auths when the request disallows them.
+func selectionPredicate(tried map[string]struct{}, pinnedAuthID string, disallowFreeAuth bool) func(*scheduledAuth) bool {
+	pinnedAuthID = strings.TrimSpace(pinnedAuthID)
 	return func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		_, ok := tried[entry.auth.ID]
-		return !ok
+		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+			return false
+		}
+		if len(tried) > 0 {
+			if _, ok := tried[entry.auth.ID]; ok {
+				return false
+			}
+		}
+		if disallowFreeAuth && isFreeCodexAuth(entry.auth) {
+			return false
+		}
+		return true
 	}
 }
 
@@ -885,7 +888,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
 	if m == nil {
 		return 0
 	}
@@ -893,10 +896,20 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	if bucket == nil {
 		return 0
 	}
+	view := bucket.all
 	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		return len(bucket.ws.flat)
+		view = bucket.ws
 	}
-	return len(bucket.all.flat)
+	if predicate == nil {
+		return len(view.flat)
+	}
+	count := 0
+	for _, entry := range view.flat {
+		if predicate(entry) {
+			count++
+		}
+	}
+	return count
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
