@@ -2409,33 +2409,71 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
 
-	if clearModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
+	registryModel := result.Model
+	if registryModel != "" {
+		if base := canonicalModelKey(registryModel); base != "" {
+			registryModel = base
+		}
 	}
-	if setModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model)
+	if clearModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, registryModel)
+	}
+	if setModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, registryModel)
 	}
 	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
+		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, registryModel)
 	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, registryModel, suspendReason)
 	}
 
 	m.hook.OnResult(ctx, result)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
-	if auth == nil || model == "" {
+	if auth == nil {
 		return nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	// Store and look up model runtime state under the canonical base model so
+	// thinking-suffix requests (e.g. "gpt-4(high)") share cooldown with the
+	// scheduler shard keyed by "gpt-4".
+	key := canonicalModelKey(model)
+	if key == "" {
+		key = model
 	}
 	if auth.ModelStates == nil {
 		auth.ModelStates = make(map[string]*ModelState)
 	}
-	if state, ok := auth.ModelStates[model]; ok && state != nil {
+	if state, ok := auth.ModelStates[key]; ok && state != nil {
+		if key != model {
+			delete(auth.ModelStates, model)
+		}
+		return state
+	}
+	// Migrate any legacy suffix-keyed state into the canonical key.
+	var legacyKeys []string
+	for existingKey, existingState := range auth.ModelStates {
+		if existingState == nil || existingKey == key {
+			continue
+		}
+		if canonicalModelKey(existingKey) == key {
+			legacyKeys = append(legacyKeys, existingKey)
+		}
+	}
+	if len(legacyKeys) > 0 {
+		state := auth.ModelStates[legacyKeys[0]]
+		auth.ModelStates[key] = state
+		for _, legacyKey := range legacyKeys {
+			delete(auth.ModelStates, legacyKey)
+		}
 		return state
 	}
 	state := &ModelState{Status: StatusActive}
-	auth.ModelStates[model] = state
+	auth.ModelStates[key] = state
 	return state
 }
 

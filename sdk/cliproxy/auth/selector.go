@@ -368,6 +368,41 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// lookupModelState finds the runtime state for model, preferring the canonical
+// base-model key and falling back to any legacy suffix-keyed entry that maps to
+// the same base. This keeps scheduler shards (canonical keys) aligned with
+// MarkResult writes that historically used thinking-suffix model strings.
+func lookupModelState(auth *Auth, model string) (*ModelState, bool) {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil, false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, false
+	}
+	if state, ok := auth.ModelStates[model]; ok && state != nil {
+		return state, true
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel == "" {
+		baseModel = model
+	}
+	if baseModel != model {
+		if state, ok := auth.ModelStates[baseModel]; ok && state != nil {
+			return state, true
+		}
+	}
+	for existingKey, existingState := range auth.ModelStates {
+		if existingState == nil || existingKey == model || existingKey == baseModel {
+			continue
+		}
+		if canonicalModelKey(existingKey) == baseModel {
+			return existingState, true
+		}
+	}
+	return nil, false
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -377,13 +412,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
-				}
-			}
+			state, ok := lookupModelState(auth, model)
 			if ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}

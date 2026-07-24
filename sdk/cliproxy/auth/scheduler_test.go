@@ -662,3 +662,92 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestManager_SchedulerSeesCooldownWrittenWithThinkingSuffix(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	registerSchedulerModels(t, "gemini", "test-model", "auth-a", "auth-b")
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry("auth-a")
+	manager.RefreshSchedulerEntry("auth-b")
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "auth-a",
+		Provider: "gemini",
+		Model:    "test-model(high)",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	manager.mu.RLock()
+	authA := manager.auths["auth-a"]
+	if authA == nil {
+		manager.mu.RUnlock()
+		t.Fatal("auth-a missing after MarkResult")
+	}
+	if _, ok := authA.ModelStates["test-model"]; !ok {
+		manager.mu.RUnlock()
+		t.Fatalf("ModelStates keys = %v, want canonical key %q", authA.ModelStates, "test-model")
+	}
+	if _, ok := authA.ModelStates["test-model(high)"]; ok {
+		manager.mu.RUnlock()
+		t.Fatalf("ModelStates still has suffix key %q", "test-model(high)")
+	}
+	manager.mu.RUnlock()
+
+	for _, model := range []string{"test-model", "test-model(high)", "test-model(low)"} {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown error = %v", model, errPick)
+		}
+		if got == nil || got.ID != "auth-b" {
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown auth = %v, want auth-b", model, got)
+		}
+	}
+}
+
+func TestIsAuthBlockedForModel_LegacySuffixKeyVisibleViaCanonicalLookup(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model(high)": {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(auth, "test-model", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true for legacy suffix-keyed cooldown")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+
+	// ensureModelState should migrate the legacy key.
+	state := ensureModelState(auth, "test-model(low)")
+	if state == nil {
+		t.Fatal("ensureModelState returned nil")
+	}
+	if _, ok := auth.ModelStates["test-model"]; !ok {
+		t.Fatalf("ModelStates keys = %v, want migrated canonical key", auth.ModelStates)
+	}
+	if _, ok := auth.ModelStates["test-model(high)"]; ok {
+		t.Fatalf("legacy suffix key still present: %v", auth.ModelStates)
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("migrated state lost cooldown: %+v", state)
+	}
+}
