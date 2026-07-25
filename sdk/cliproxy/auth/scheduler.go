@@ -208,41 +208,47 @@ func (s *authScheduler) setSelector(selector Selector) {
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
-// Mixed-provider cursors are intentionally reset (selector/strategy changes).
+// Mixed-provider and per-model cursors are intentionally reset (selector/strategy/load paths).
 func (s *authScheduler) rebuild(auths []*Auth) {
-	s.rebuildWithOptions(auths, true)
-}
-
-// resync refreshes provider/auth/model readiness from a snapshot while preserving
-// mixed-provider rotation cursors. Per-model ready-view cursors are restored by
-// rebuildIndexesLocked during upsert.
-func (s *authScheduler) resync(auths []*Auth) {
-	s.rebuildWithOptions(auths, false)
-}
-
-func (s *authScheduler) rebuildWithOptions(auths []*Auth, resetMixedCursors bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	preservedMixed := s.mixedCursors
-	if resetMixedCursors || preservedMixed == nil {
-		preservedMixed = make(map[string]int)
-	} else {
-		// Shallow copy so concurrent picks after unlock cannot observe a half-built map.
-		copied := make(map[string]int, len(preservedMixed))
-		for key, value := range preservedMixed {
-			copied[key] = value
-		}
-		preservedMixed = copied
-	}
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
-	s.mixedCursors = preservedMixed
+	s.mixedCursors = make(map[string]int)
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
+	}
+}
+
+// resync surgically refreshes auth readiness from a snapshot without tearing down
+// provider/model shards. Existing ready-view RR cursors and mixedCursors are kept.
+func (s *authScheduler) resync(auths []*Auth) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	keep := make(map[string]struct{}, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		authID := strings.TrimSpace(auth.ID)
+		if authID == "" {
+			continue
+		}
+		keep[authID] = struct{}{}
+		s.upsertAuthLocked(auth, now)
+	}
+	for authID := range s.authProviders {
+		if _, ok := keep[authID]; !ok {
+			s.removeAuthLocked(authID)
+		}
 	}
 }
 
@@ -866,6 +872,16 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	return 0, false
 }
 
+// preferWebsocketReadyView reports whether the websocket-only ready view still has a
+// candidate that satisfies predicate. Callers must fall back to the full ready view
+// when this is false so HTTP credentials remain reachable after WS auths are tried.
+func preferWebsocketReadyView(bucket *readyBucket, preferWebsocket bool, predicate func(*scheduledAuth) bool) bool {
+	if !preferWebsocket || bucket == nil {
+		return false
+	}
+	return bucket.ws.pickFirst(predicate) != nil
+}
+
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
 func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
@@ -877,7 +893,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	view := &bucket.all
-	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+	if preferWebsocketReadyView(bucket, preferWebsocket, predicate) {
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth
@@ -901,7 +917,7 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 		return 0
 	}
 	view := bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
+	if preferWebsocketReadyView(bucket, preferWebsocket, predicate) {
 		view = bucket.ws
 	}
 	if predicate == nil {

@@ -751,19 +751,15 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
-func selectionArgForSelector(_ Selector, routeModel string) string {
-	// Always pass the route model so legacy built-in selectors keep per-model cursors
-	// and availability checks aligned with the scheduler.
-	return routeModel
-}
-
 // selectionArgForLegacyPick chooses the model string passed into Selector.Pick.
-// When every pre-filtered auth resolves the route to the same selection model
-// (for example an OAuth alias fork), use that selection model so re-checks inside
-// the selector observe the same state keys as availableAuthsForRouteModel.
-// Otherwise fall back to the route model for cursor partitioning.
-func (m *Manager) selectionArgForLegacyPick(auths []*Auth, routeModel string) string {
+// Built-in selectors receive the shared selection model when all candidates agree
+// (OAuth alias forks) so re-checks match availableAuthsForRouteModel state keys.
+// Custom selectors always receive the client-facing route model.
+func (m *Manager) selectionArgForLegacyPick(selector Selector, auths []*Auth, routeModel string) string {
 	routeModel = strings.TrimSpace(routeModel)
+	if !isBuiltInSelector(selector) {
+		return routeModel
+	}
 	if m == nil || len(auths) == 0 {
 		return routeModel
 	}
@@ -2495,7 +2491,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
-	if !result.Success && result.AuthID != "" {
+	if !result.Success && result.AuthID != "" && !isRequestScopedResultError(result.Error) {
 		if affinity := m.sessionAffinitySelector(); affinity != nil {
 			affinity.InvalidateAuth(result.AuthID)
 		}
@@ -3455,7 +3451,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, m.selectionArgForLegacyPick(available, model), opts, available)
+	selected, errPick := m.selector.Pick(ctx, provider, m.selectionArgForLegacyPick(m.selector, available, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -3606,7 +3602,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", m.selectionArgForLegacyPick(available, model), opts, available)
+	selected, errPick := m.selector.Pick(ctx, "mixed", m.selectionArgForLegacyPick(m.selector, available, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick

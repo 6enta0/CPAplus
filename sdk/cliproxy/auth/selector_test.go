@@ -1459,3 +1459,32 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	default:
 	}
 }
+
+func TestLookupModelState_CanonicalCooldownBeatsCleanSuffixState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model": {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+			"test-model(low)": {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+		},
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(auth, "test-model(low)", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true when canonical key is cooling down")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want cooldown", reason)
+	}
+}

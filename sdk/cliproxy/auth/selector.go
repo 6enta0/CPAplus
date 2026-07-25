@@ -399,10 +399,10 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
-// lookupModelState finds the runtime state for model, preferring the canonical
-// base-model key and falling back to any legacy suffix-keyed entry that maps to
-// the same base. This keeps scheduler shards (canonical keys) aligned with
-// MarkResult writes that historically used thinking-suffix model strings.
+// lookupModelState finds the runtime state for model across the canonical base
+// key and any legacy thinking-suffix keys that map to the same base. When both
+// exist, the more restrictive state wins so a clean suffix entry cannot hide a
+// base-model cooldown.
 func lookupModelState(auth *Auth, model string) (*ModelState, bool) {
 	if auth == nil || len(auth.ModelStates) == 0 {
 		return nil, false
@@ -411,27 +411,59 @@ func lookupModelState(auth *Auth, model string) (*ModelState, bool) {
 	if model == "" {
 		return nil, false
 	}
-	if state, ok := auth.ModelStates[model]; ok && state != nil {
-		return state, true
-	}
 	baseModel := canonicalModelKey(model)
 	if baseModel == "" {
 		baseModel = model
 	}
-	if baseModel != model {
-		if state, ok := auth.ModelStates[baseModel]; ok && state != nil {
-			return state, true
-		}
-	}
+	var best *ModelState
 	for existingKey, existingState := range auth.ModelStates {
-		if existingState == nil || existingKey == model || existingKey == baseModel {
+		if existingState == nil {
 			continue
 		}
-		if canonicalModelKey(existingKey) == baseModel {
-			return existingState, true
+		keyBase := canonicalModelKey(existingKey)
+		if keyBase == "" {
+			keyBase = existingKey
+		}
+		if keyBase != baseModel && existingKey != model {
+			continue
+		}
+		if best == nil || modelStateMoreRestrictive(existingState, best) {
+			best = existingState
 		}
 	}
-	return nil, false
+	return best, best != nil
+}
+
+// modelStateMoreRestrictive reports whether candidate should replace current
+// when multiple ModelStates map to the same logical model.
+func modelStateMoreRestrictive(candidate, current *ModelState) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	rank := func(state *ModelState) int {
+		if state == nil {
+			return 0
+		}
+		if state.Status == StatusDisabled {
+			return 3
+		}
+		if state.Unavailable && !state.NextRetryAfter.IsZero() {
+			return 2
+		}
+		if state.Unavailable {
+			return 1
+		}
+		return 0
+	}
+	candidateRank := rank(candidate)
+	currentRank := rank(current)
+	if candidateRank != currentRank {
+		return candidateRank > currentRank
+	}
+	return candidate.NextRetryAfter.After(current.NextRetryAfter)
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
