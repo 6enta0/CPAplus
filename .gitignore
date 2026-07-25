@@ -15,6 +15,7 @@ bin/*
 logs/*
 conv/*
 temp/*
+tmp/*
 refs/*
 usage.db
 usage.db-shm
