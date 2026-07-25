@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +82,141 @@ func TestGetUsageStatisticsRejectsUnsupportedRange(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestGetUsageKeyStatsAggregatesWithoutDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(prevEnabled)
+
+	stats := internalusage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-30 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 10},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		Failed:      true,
+		RequestedAt: now.Add(-10 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 4},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-b",
+		Model:       "model-b",
+		Source:      "source-b",
+		AuthIndex:   "auth-2",
+		RequestedAt: now.Add(-48 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 99},
+	})
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-statistics/key-stats?range=24h", nil)
+
+	h := &Handler{usageStats: stats}
+	h.GetUsageKeyStats(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Range         string                                 `json:"range"`
+		TotalRequests int64                                  `json:"total_requests"`
+		SuccessCount  int64                                  `json:"success_count"`
+		FailureCount  int64                                  `json:"failure_count"`
+		TotalTokens   int64                                  `json:"total_tokens"`
+		ByAuthIndex   map[string]internalusage.KeyStatBucket `json:"by_auth_index"`
+		BySource      map[string]internalusage.KeyStatBucket `json:"by_source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Range != "24h" {
+		t.Fatalf("range = %q, want 24h", payload.Range)
+	}
+	if payload.TotalRequests != 2 || payload.SuccessCount != 1 || payload.FailureCount != 1 {
+		t.Fatalf("totals = req=%d success=%d failure=%d, want 2/1/1", payload.TotalRequests, payload.SuccessCount, payload.FailureCount)
+	}
+	if payload.TotalTokens != 14 {
+		t.Fatalf("tokens = %d, want 14", payload.TotalTokens)
+	}
+	auth1 := payload.ByAuthIndex["auth-1"]
+	if auth1.Success != 1 || auth1.Failure != 1 || auth1.Tokens != 14 {
+		t.Fatalf("auth-1 bucket = %+v", auth1)
+	}
+	if _, ok := payload.ByAuthIndex["auth-2"]; ok {
+		t.Fatalf("auth-2 should be excluded by 24h range")
+	}
+	sourceA := payload.BySource["source-a"]
+	if sourceA.Success != 1 || sourceA.Failure != 1 {
+		t.Fatalf("source-a bucket = %+v", sourceA)
+	}
+	if strings.Contains(rec.Body.String(), `"details"`) {
+		t.Fatalf("key-stats response unexpectedly includes details")
+	}
+}
+
+func TestGetUsageSummaryReturnsModelRollups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(prevEnabled)
+
+	stats := internalusage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TotalTokens: 5},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-b",
+		Failed:      true,
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TotalTokens: 7},
+	})
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-statistics/summary?range=all", nil)
+
+	h := &Handler{usageStats: stats}
+	h.GetUsageSummary(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		TotalRequests int64                            `json:"total_requests"`
+		SuccessCount  int64                            `json:"success_count"`
+		FailureCount  int64                            `json:"failure_count"`
+		Models        []internalusage.SummaryModelStat `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.TotalRequests != 2 || payload.SuccessCount != 1 || payload.FailureCount != 1 {
+		t.Fatalf("totals unexpected: %+v", payload)
+	}
+	if len(payload.Models) != 2 {
+		t.Fatalf("models = %d, want 2", len(payload.Models))
+	}
+	if strings.Contains(rec.Body.String(), `"details"`) {
+		t.Fatalf("summary response unexpectedly includes details")
 	}
 }

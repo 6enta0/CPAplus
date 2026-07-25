@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS usage_records (
 CREATE INDEX IF NOT EXISTS idx_usage_records_timestamp ON usage_records(timestamp);
 CREATE INDEX IF NOT EXISTS idx_usage_records_api_key  ON usage_records(api_key);
 CREATE INDEX IF NOT EXISTS idx_usage_records_model     ON usage_records(model);
+CREATE INDEX IF NOT EXISTS idx_usage_records_auth_index ON usage_records(auth_index);
 CREATE TABLE IF NOT EXISTS auth_last_used (
 	auth_index    TEXT PRIMARY KEY,
 	last_called_at TEXT NOT NULL

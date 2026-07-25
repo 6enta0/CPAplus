@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -123,6 +124,41 @@ type StatisticsSnapshot struct {
 type SnapshotOptions struct {
 	Since time.Time
 	Until time.Time
+}
+
+// KeyStatBucket is a compact success/failure counter for one identity key.
+type KeyStatBucket struct {
+	Success int64 `json:"success"`
+	Failure int64 `json:"failure"`
+	Tokens  int64 `json:"tokens,omitempty"`
+}
+
+// KeyStatsSnapshot is a list-page friendly aggregation without request details.
+type KeyStatsSnapshot struct {
+	TotalRequests int64                    `json:"total_requests"`
+	SuccessCount  int64                    `json:"success_count"`
+	FailureCount  int64                    `json:"failure_count"`
+	TotalTokens   int64                    `json:"total_tokens"`
+	ByAuthIndex   map[string]KeyStatBucket `json:"by_auth_index"`
+	BySource      map[string]KeyStatBucket `json:"by_source"`
+}
+
+// SummaryModelStat is a compact per-model rollup for summary cards.
+type SummaryModelStat struct {
+	Model         string `json:"model"`
+	TotalRequests int64  `json:"total_requests"`
+	SuccessCount  int64  `json:"success_count"`
+	FailureCount  int64  `json:"failure_count"`
+	TotalTokens   int64  `json:"total_tokens"`
+}
+
+// SummarySnapshot is a compact dashboard/summary payload without request details.
+type SummarySnapshot struct {
+	TotalRequests int64              `json:"total_requests"`
+	SuccessCount  int64              `json:"success_count"`
+	FailureCount  int64              `json:"failure_count"`
+	TotalTokens   int64              `json:"total_tokens"`
+	Models        []SummaryModelStat `json:"models,omitempty"`
 }
 
 func (o SnapshotOptions) HasRange() bool {
@@ -247,6 +283,149 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 
 func (s *RequestStatistics) SnapshotRange(since, until time.Time) StatisticsSnapshot {
 	return s.SnapshotWithOptions(SnapshotOptions{Since: since, Until: until})
+}
+
+func (s *RequestStatistics) KeyStats() KeyStatsSnapshot {
+	return s.KeyStatsWithOptions(SnapshotOptions{})
+}
+
+func (s *RequestStatistics) KeyStatsWithOptions(options SnapshotOptions) KeyStatsSnapshot {
+	result := KeyStatsSnapshot{
+		ByAuthIndex: make(map[string]KeyStatBucket),
+		BySource:    make(map[string]KeyStatBucket),
+	}
+	if s == nil {
+		return result
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details {
+				if !options.includes(detail.Timestamp) {
+					continue
+				}
+				tokens := detail.Tokens.TotalTokens
+				if tokens < 0 {
+					tokens = 0
+				}
+				result.TotalRequests++
+				result.TotalTokens += tokens
+				if detail.Failed {
+					result.FailureCount++
+				} else {
+					result.SuccessCount++
+				}
+
+				if authIndex := strings.TrimSpace(detail.AuthIndex); authIndex != "" {
+					bucket := result.ByAuthIndex[authIndex]
+					if detail.Failed {
+						bucket.Failure++
+					} else {
+						bucket.Success++
+					}
+					bucket.Tokens += tokens
+					result.ByAuthIndex[authIndex] = bucket
+				}
+				if source := strings.TrimSpace(detail.Source); source != "" {
+					bucket := result.BySource[source]
+					if detail.Failed {
+						bucket.Failure++
+					} else {
+						bucket.Success++
+					}
+					bucket.Tokens += tokens
+					result.BySource[source] = bucket
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (s *RequestStatistics) Summary() SummarySnapshot {
+	return s.SummaryWithOptions(SnapshotOptions{}, 20)
+}
+
+func (s *RequestStatistics) SummaryWithOptions(options SnapshotOptions, modelLimit int) SummarySnapshot {
+	if modelLimit <= 0 {
+		modelLimit = 20
+	}
+	result := SummarySnapshot{}
+	if s == nil {
+		return result
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	modelTotals := make(map[string]*SummaryModelStat)
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			name := strings.TrimSpace(modelName)
+			if name == "" {
+				name = "unknown"
+			}
+			for _, detail := range modelStatsValue.Details {
+				if !options.includes(detail.Timestamp) {
+					continue
+				}
+				tokens := detail.Tokens.TotalTokens
+				if tokens < 0 {
+					tokens = 0
+				}
+				result.TotalRequests++
+				result.TotalTokens += tokens
+				entry := modelTotals[name]
+				if entry == nil {
+					entry = &SummaryModelStat{Model: name}
+					modelTotals[name] = entry
+				}
+				entry.TotalRequests++
+				entry.TotalTokens += tokens
+				if detail.Failed {
+					result.FailureCount++
+					entry.FailureCount++
+				} else {
+					result.SuccessCount++
+					entry.SuccessCount++
+				}
+			}
+		}
+	}
+
+	models := make([]SummaryModelStat, 0, len(modelTotals))
+	for _, entry := range modelTotals {
+		models = append(models, *entry)
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].TotalRequests == models[j].TotalRequests {
+			if models[i].TotalTokens == models[j].TotalTokens {
+				return models[i].Model < models[j].Model
+			}
+			return models[i].TotalTokens > models[j].TotalTokens
+		}
+		return models[i].TotalRequests > models[j].TotalRequests
+	})
+	if len(models) > modelLimit {
+		models = models[:modelLimit]
+	}
+	result.Models = models
+	return result
 }
 
 func (s *RequestStatistics) SnapshotWithOptions(options SnapshotOptions) StatisticsSnapshot {

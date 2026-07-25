@@ -246,9 +246,19 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	var lastCalled map[string]string
+	var costs map[string]float64
+	if h.usageStore != nil {
+		if values, err := h.usageStore.GetLastCalledAt(); err == nil {
+			lastCalled = values
+		}
+		if values, err := h.usageStore.GetCostByAuthIndex(); err == nil {
+			costs = values
+		}
+	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, lastCalled, costs); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -365,7 +375,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, lastCalled map[string]string, costs map[string]float64) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -400,17 +410,11 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
-	if h.usageStore != nil {
-		if lastCalled, err := h.usageStore.GetLastCalledAt(); err == nil {
-			if t, ok := lastCalled[auth.Index]; ok {
-				entry["last_used_at"] = t
-			}
-		}
-		if costs, err := h.usageStore.GetCostByAuthIndex(); err == nil {
-			if cost, ok := costs[auth.Index]; ok {
-				entry["total_cost_usd"] = cost
-			}
-		}
+	if t, ok := lastCalled[auth.Index]; ok {
+		entry["last_used_at"] = t
+	}
+	if cost, ok := costs[auth.Index]; ok {
+		entry["total_cost_usd"] = cost
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email

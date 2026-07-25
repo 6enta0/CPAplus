@@ -562,6 +562,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 		mgmt.GET("/usage-statistics", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage-statistics/key-stats", s.mgmt.GetUsageKeyStats)
+		mgmt.GET("/usage-statistics/summary", s.mgmt.GetUsageSummary)
 		mgmt.GET("/usage-statistics/export", s.mgmt.ExportUsageStatistics)
 		mgmt.PUT("/usage-statistics/import", s.mgmt.ImportUsageStatistics)
 
