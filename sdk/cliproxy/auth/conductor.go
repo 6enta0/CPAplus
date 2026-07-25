@@ -113,8 +113,11 @@ type Result struct {
 	AuthID string
 	// Provider is copied for convenience when emitting hooks.
 	Provider string
-	// Model is the upstream model identifier used for the request.
+	// Model is the upstream model identifier used for the request / state key.
 	Model string
+	// RouteModel is the client-facing route/alias model used for auth selection.
+	// When empty, affinity invalidation falls back to Model.
+	RouteModel string
 	// Success marks whether the execution succeeded.
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
@@ -220,8 +223,20 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	return manager
 }
 
+// unwrapSelector peels SessionAffinitySelector wrappers so built-in strategy
+// detection and the scheduler fast path still see RoundRobin/FillFirst.
+func unwrapSelector(selector Selector) Selector {
+	for {
+		affinity, ok := selector.(*SessionAffinitySelector)
+		if !ok || affinity == nil || affinity.fallback == nil {
+			return selector
+		}
+		selector = affinity.fallback
+	}
+}
+
 func isBuiltInSelector(selector Selector) bool {
-	switch selector.(type) {
+	switch unwrapSelector(selector).(type) {
 	case *RoundRobinSelector, *FillFirstSelector:
 		return true
 	default:
@@ -241,6 +256,16 @@ func (m *Manager) syncScheduler() {
 		return
 	}
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+}
+
+// refreshSchedulerOnPickMiss re-upserts auth snapshots without wiping mixed RR
+// cursors. Used when a scheduler pick fails in a way that may be caused by a
+// stale supportedModelSet rather than a true empty pool.
+func (m *Manager) refreshSchedulerOnPickMiss() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	m.scheduler.resync(m.snapshotAuths())
 }
 
 func (m *Manager) snapshotAuths() []*Auth {
@@ -630,6 +655,72 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 	return models
 }
 
+// shouldInvalidateSessionAffinity reports whether a failed execution should clear
+// sticky session bindings for the auth. Partial OpenAI-compat pool cooldowns keep
+// affinity when another upstream for the same route remains executable.
+func (m *Manager) shouldInvalidateSessionAffinity(auth *Auth, result Result) bool {
+	if auth == nil {
+		return true
+	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return true
+	}
+	routeModel := strings.TrimSpace(result.RouteModel)
+	if routeModel == "" {
+		routeModel = strings.TrimSpace(result.Model)
+	}
+	if routeModel == "" {
+		return auth.Unavailable && !auth.NextRetryAfter.IsZero()
+	}
+	blocked, _, _ := m.routeModelAvailability(auth, routeModel, time.Now())
+	return blocked
+}
+
+// routeModelAvailability reports whether auth can execute routeModel right now.
+// For OpenAI-compat multi-upstream pools, the auth is available if at least one
+// upstream model is not blocked; MarkResult stores cooldowns under upstream keys.
+func (m *Manager) routeModelAvailability(auth *Auth, routeModel string, now time.Time) (blocked bool, reason blockReason, next time.Time) {
+	if auth == nil {
+		return true, blockReasonOther, time.Time{}
+	}
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if strings.TrimSpace(requestedModel) == "" {
+		requestedModel = strings.TrimSpace(routeModel)
+	}
+	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 1 {
+		cooldownCount := 0
+		var earliest time.Time
+		anyReady := false
+		for _, upstream := range pool {
+			upstream = strings.TrimSpace(upstream)
+			if upstream == "" {
+				continue
+			}
+			upBlocked, upReason, upNext := isAuthBlockedForModel(auth, upstream, now)
+			if !upBlocked {
+				anyReady = true
+				continue
+			}
+			if upReason == blockReasonCooldown {
+				cooldownCount++
+				if !upNext.IsZero() && (earliest.IsZero() || upNext.Before(earliest)) {
+					earliest = upNext
+				}
+			}
+		}
+		if anyReady {
+			return false, blockReasonNone, time.Time{}
+		}
+		if cooldownCount > 0 && !earliest.IsZero() {
+			return true, blockReasonCooldown, earliest
+		}
+		return true, blockReasonOther, time.Time{}
+	}
+	checkModel := m.selectionModelForAuth(auth, routeModel)
+	return isAuthBlockedForModel(auth, checkModel, now)
+}
+
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -639,8 +730,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	cooldownCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
-		checkModel := m.selectionModelForAuth(candidate, routeModel)
-		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		blocked, reason, next := m.routeModelAvailability(candidate, routeModel, now)
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
@@ -685,11 +775,28 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
-func selectionArgForSelector(selector Selector, routeModel string) string {
-	if isBuiltInSelector(selector) {
-		return ""
+// selectionArgForLegacyPick chooses the model string passed into Selector.Pick.
+// Built-in selectors receive the shared selection model when all candidates agree
+// (OAuth alias forks) so re-checks match availableAuthsForRouteModel state keys.
+// Custom selectors always receive the client-facing route model.
+func (m *Manager) selectionArgForLegacyPick(selector Selector, auths []*Auth, routeModel string) string {
+	routeModel = strings.TrimSpace(routeModel)
+	if !isBuiltInSelector(selector) {
+		return routeModel
 	}
-	return routeModel
+	if m == nil || len(auths) == 0 {
+		return routeModel
+	}
+	first := strings.TrimSpace(m.selectionModelForAuth(auths[0], routeModel))
+	if first == "" {
+		return routeModel
+	}
+	for _, auth := range auths[1:] {
+		if strings.TrimSpace(m.selectionModelForAuth(auth, routeModel)) != first {
+			return routeModel
+		}
+	}
+	return first
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -849,7 +956,7 @@ func normalizeCompatBootstrapAttemptError(parentCtx, attemptCtx context.Context,
 	return err, false
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -859,7 +966,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if chunk.Err != nil && !failed {
 				failed = true
 				rerr := resultErrorFromError(chunk.Err)
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr})
 			}
 			if !forward {
 				return false
@@ -889,7 +996,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -927,7 +1034,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				errStream = normalizedErr
 			}
 			rerr := resultErrorFromError(errStream)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
@@ -948,7 +1055,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -956,7 +1063,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
@@ -964,7 +1071,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				continue
 			}
 			rerr := resultErrorFromError(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
@@ -974,7 +1081,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if closed && len(buffered) == 0 {
 			attemptCancel()
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
@@ -989,7 +1096,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1438,7 +1545,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			resp, errExec := executor.Execute(attemptCtx, auth, execReq, opts)
 			cancel()
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil}
 			if errExec != nil {
 				if normalizedErr, abort := normalizeCompatBootstrapAttemptError(ctx, attemptCtx, bootstrapTimeout, errExec); abort {
 					return cliproxyexecutor.Response{}, normalizedErr
@@ -1520,7 +1627,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				execReq.Model = executionModel
 			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -2408,34 +2515,79 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
-
-	if clearModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
+	if !result.Success && result.AuthID != "" && !isRequestScopedResultError(result.Error) {
+		if affinity := m.sessionAffinitySelector(); affinity != nil {
+			if m.shouldInvalidateSessionAffinity(authSnapshot, result) {
+				affinity.InvalidateAuth(result.AuthID)
+			}
+		}
 	}
-	if setModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model)
+
+	registryModel := result.Model
+	if registryModel != "" {
+		if base := canonicalModelKey(registryModel); base != "" {
+			registryModel = base
+		}
+	}
+	if clearModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, registryModel)
+	}
+	if setModelQuota && registryModel != "" {
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, registryModel)
 	}
 	if shouldResumeModel {
-		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
+		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, registryModel)
 	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, registryModel, suspendReason)
 	}
 
 	m.hook.OnResult(ctx, result)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
-	if auth == nil || model == "" {
+	if auth == nil {
 		return nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	// Store and look up model runtime state under the canonical base model so
+	// thinking-suffix requests (e.g. "gpt-4(high)") share cooldown with the
+	// scheduler shard keyed by "gpt-4".
+	key := canonicalModelKey(model)
+	if key == "" {
+		key = model
 	}
 	if auth.ModelStates == nil {
 		auth.ModelStates = make(map[string]*ModelState)
 	}
-	if state, ok := auth.ModelStates[model]; ok && state != nil {
+	if state, ok := auth.ModelStates[key]; ok && state != nil {
+		if key != model {
+			delete(auth.ModelStates, model)
+		}
+		return state
+	}
+	// Migrate any legacy suffix-keyed state into the canonical key.
+	var legacyKeys []string
+	for existingKey, existingState := range auth.ModelStates {
+		if existingState == nil || existingKey == key {
+			continue
+		}
+		if canonicalModelKey(existingKey) == key {
+			legacyKeys = append(legacyKeys, existingKey)
+		}
+	}
+	if len(legacyKeys) > 0 {
+		state := auth.ModelStates[legacyKeys[0]]
+		auth.ModelStates[key] = state
+		for _, legacyKey := range legacyKeys {
+			delete(auth.ModelStates, legacyKey)
+		}
 		return state
 	}
 	state := &ModelState{Status: StatusActive}
-	auth.ModelStates[model] = state
+	auth.ModelStates[key] = state
 	return state
 }
 
@@ -3167,6 +3319,80 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
+func (m *Manager) sessionAffinitySelector() *SessionAffinitySelector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	affinity, _ := m.selector.(*SessionAffinitySelector)
+	return affinity
+}
+
+func optionsWithPinnedAuth(opts cliproxyexecutor.Options, authID string) cliproxyexecutor.Options {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return opts
+	}
+	out := opts
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		meta[key] = value
+	}
+	meta[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+	out.Metadata = meta
+	return out
+}
+
+func sessionAffinityCacheKey(provider, sessionID, model string) string {
+	provider = strings.TrimSpace(provider)
+	sessionID = strings.TrimSpace(sessionID)
+	if provider == "" || sessionID == "" {
+		return ""
+	}
+	modelKey := canonicalModelKey(model)
+	return provider + "::" + sessionID + "::" + modelKey
+}
+
+// prepareSessionAffinityPick returns pick options with an optional pin and the
+// cache key used to rebind after selection. Fast path keeps the scheduler; the
+// pin reuses sticky credentials without forcing the legacy selector path.
+func (m *Manager) prepareSessionAffinityPick(opts cliproxyexecutor.Options, provider, model string, tried map[string]struct{}) (cliproxyexecutor.Options, *SessionAffinitySelector, string) {
+	affinity := m.sessionAffinitySelector()
+	if affinity == nil || affinity.cache == nil {
+		return opts, nil, ""
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return opts, affinity, ""
+	}
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, model)
+	if cacheKey == "" {
+		return opts, affinity, ""
+	}
+	if authID, ok := affinity.cache.GetAndRefresh(cacheKey); ok {
+		if _, used := tried[authID]; !used {
+			return optionsWithPinnedAuth(opts, authID), affinity, cacheKey
+		}
+	}
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, model)
+		if authID, ok := affinity.cache.Get(fallbackKey); ok {
+			if _, used := tried[authID]; !used {
+				return optionsWithPinnedAuth(opts, authID), affinity, cacheKey
+			}
+		}
+	}
+	return opts, affinity, cacheKey
+}
+
+func bindSessionAffinity(affinity *SessionAffinitySelector, cacheKey, authID string) {
+	if affinity == nil || affinity.cache == nil || cacheKey == "" || strings.TrimSpace(authID) == "" {
+		return
+	}
+	affinity.cache.Set(cacheKey, authID)
+}
+
 func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
@@ -3251,7 +3477,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := m.selector.Pick(ctx, provider, m.selectionArgForLegacyPick(m.selector, available, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -3299,11 +3525,17 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	strategyOverride := m.compatStrategyOverrideForProviders([]string{provider})
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	optsPick, affinity, affinityKey := m.prepareSessionAffinityPick(opts, provider, model, tried)
 	for {
-		selected, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
+		selected, errPick := m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
+		if errPick != nil && pinnedAuthIDFromMetadata(optsPick.Metadata) != "" {
+			// Sticky auth unavailable: fall back to normal scheduler rotation and rebind.
+			optsPick = opts
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
+		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
-			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, opts, tried, strategyOverride)
+			m.refreshSchedulerOnPickMiss()
+			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, provider, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, errPick
@@ -3327,6 +3559,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 			m.mu.Unlock()
 		}
+		bindSessionAffinity(affinity, affinityKey, authCopy.ID)
 		return authCopy, executor, nil
 	}
 }
@@ -3395,7 +3628,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	selected, errPick := m.selector.Pick(ctx, "mixed", m.selectionArgForLegacyPick(m.selector, available, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick
@@ -3473,11 +3706,16 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	optsPick, affinity, affinityKey := m.prepareSessionAffinityPick(opts, "mixed", model, tried)
 	for {
-		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
+		selected, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
+		if errPick != nil && pinnedAuthIDFromMetadata(optsPick.Metadata) != "" {
+			optsPick = opts
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
+		}
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
-			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, opts, tried, strategyOverride)
+			m.refreshSchedulerOnPickMiss()
+			selected, providerKey, errPick = m.scheduler.pickMixedWithStrategy(ctx, eligibleProviders, model, optsPick, tried, strategyOverride)
 		}
 		if errPick != nil {
 			return nil, nil, "", errPick
@@ -3505,6 +3743,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 			m.mu.Unlock()
 		}
+		bindSessionAffinity(affinity, affinityKey, authCopy.ID)
 		return authCopy, executor, providerKey, nil
 	}
 }
@@ -3638,7 +3877,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {

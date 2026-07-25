@@ -25,9 +25,10 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu          sync.Mutex
+	cursors     map[string]int
+	cursorOrder []string // insertion order for oldest-key eviction under maxKeys
+	maxKeys     int
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -286,12 +287,14 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		if _, exists := s.cursors[groupKey]; !exists {
 			// Seed with a random initial offset so the starting credential is randomized.
 			s.cursors[groupKey] = rand.IntN(len(parentOrder))
+			s.trackCursorKey(groupKey)
 		}
 		groupIndex := s.cursors[groupKey]
 		if groupIndex >= 2_147_483_640 {
 			groupIndex = 0
 		}
 		s.cursors[groupKey] = groupIndex + 1
+		s.trackCursorKey(groupKey)
 
 		selectedParent := parentOrder[groupIndex%len(parentOrder)]
 		group := groups[selectedParent]
@@ -304,6 +307,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 			innerIndex = 0
 		}
 		s.cursors[innerKey] = innerIndex + 1
+		s.trackCursorKey(innerKey)
 		s.mu.Unlock()
 		return group[innerIndex%len(group)], nil
 	}
@@ -315,16 +319,43 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		index = 0
 	}
 	s.cursors[key] = index + 1
+	s.trackCursorKey(key)
 	s.mu.Unlock()
 	return available[index%len(available)], nil
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
+// When full, evicts the oldest key instead of wiping all cursors.
 // Must be called with s.mu held.
 func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
-	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
+	if _, ok := s.cursors[key]; ok {
+		return
 	}
+	if limit <= 0 {
+		limit = 4096
+	}
+	for len(s.cursors) >= limit && len(s.cursorOrder) > 0 {
+		old := s.cursorOrder[0]
+		s.cursorOrder = s.cursorOrder[1:]
+		delete(s.cursors, old)
+	}
+}
+
+// trackCursorKey records first-insert order for oldest-key eviction.
+// Must be called with s.mu held after writing s.cursors[key].
+func (s *RoundRobinSelector) trackCursorKey(key string) {
+	if s.cursors == nil {
+		return
+	}
+	if _, ok := s.cursors[key]; !ok {
+		return
+	}
+	for _, existing := range s.cursorOrder {
+		if existing == key {
+			return
+		}
+	}
+	s.cursorOrder = append(s.cursorOrder, key)
 }
 
 // groupByVirtualParent groups auths by their gemini_virtual_parent attribute.
@@ -368,6 +399,73 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// lookupModelState finds the runtime state for model across the canonical base
+// key and any legacy thinking-suffix keys that map to the same base. When both
+// exist, the more restrictive state wins so a clean suffix entry cannot hide a
+// base-model cooldown.
+func lookupModelState(auth *Auth, model string) (*ModelState, bool) {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil, false
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, false
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel == "" {
+		baseModel = model
+	}
+	var best *ModelState
+	for existingKey, existingState := range auth.ModelStates {
+		if existingState == nil {
+			continue
+		}
+		keyBase := canonicalModelKey(existingKey)
+		if keyBase == "" {
+			keyBase = existingKey
+		}
+		if keyBase != baseModel && existingKey != model {
+			continue
+		}
+		if best == nil || modelStateMoreRestrictive(existingState, best) {
+			best = existingState
+		}
+	}
+	return best, best != nil
+}
+
+// modelStateMoreRestrictive reports whether candidate should replace current
+// when multiple ModelStates map to the same logical model.
+func modelStateMoreRestrictive(candidate, current *ModelState) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	rank := func(state *ModelState) int {
+		if state == nil {
+			return 0
+		}
+		if state.Status == StatusDisabled {
+			return 3
+		}
+		if state.Unavailable && !state.NextRetryAfter.IsZero() {
+			return 2
+		}
+		if state.Unavailable {
+			return 1
+		}
+		return 0
+	}
+	candidateRank := rank(candidate)
+	currentRank := rank(current)
+	if candidateRank != currentRank {
+		return candidateRank > currentRank
+	}
+	return candidate.NextRetryAfter.After(current.NextRetryAfter)
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -377,13 +475,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
-				}
-			}
+			state, ok := lookupModelState(auth, model)
 			if ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
@@ -495,7 +587,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 
-	cacheKey := provider + "::" + primaryID + "::" + model
+	cacheKey := sessionAffinityCacheKey(provider, primaryID, model)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -515,7 +607,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey := provider + "::" + fallbackID + "::" + model
+		fallbackKey := sessionAffinityCacheKey(provider, fallbackID, model)
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {

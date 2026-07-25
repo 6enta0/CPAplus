@@ -397,8 +397,14 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	if selector.cursors == nil {
 		t.Fatalf("selector.cursors = nil")
 	}
-	if len(selector.cursors) != 1 {
-		t.Fatalf("len(selector.cursors) = %d, want %d", len(selector.cursors), 1)
+	if len(selector.cursors) != 2 {
+		t.Fatalf("len(selector.cursors) = %d, want %d", len(selector.cursors), 2)
+	}
+	if _, ok := selector.cursors["gemini:m1"]; ok {
+		t.Fatalf("oldest cursor key %q should have been evicted", "gemini:m1")
+	}
+	if _, ok := selector.cursors["gemini:m2"]; !ok {
+		t.Fatalf("selector.cursors missing key %q", "gemini:m2")
 	}
 	if _, ok := selector.cursors["gemini:m3"]; !ok {
 		t.Fatalf("selector.cursors missing key %q", "gemini:m3")
@@ -1451,5 +1457,34 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestLookupModelState_CanonicalCooldownBeatsCleanSuffixState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model": {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+			"test-model(low)": {
+				Status:      StatusActive,
+				Unavailable: false,
+			},
+		},
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(auth, "test-model(low)", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true when canonical key is cooling down")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want cooldown", reason)
 	}
 }

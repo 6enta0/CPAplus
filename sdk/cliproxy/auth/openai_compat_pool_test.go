@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -752,5 +753,213 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 	}
 	if got := executor.StreamModels(); len(got) != 1 || got[0] != "deepseek-v3.1" {
 		t.Fatalf("stream calls = %v, want only first upstream model", got)
+	}
+}
+
+func TestManager_OpenAICompatPoolAllUpstreamsCooledSkipsAuth(t *testing.T) {
+	t.Parallel()
+
+	alias := "alias-model"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "upstream-a", Alias: alias},
+		{Name: "upstream-b", Alias: alias},
+	}, executor)
+
+	second := &Auth{
+		ID:       "pool-auth-second-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "pool",
+			"provider_key": "pool",
+			"api_key":      "k2",
+		},
+	}
+	if _, err := m.Register(context.Background(), second); err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(second.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() { reg.UnregisterClient(second.ID) })
+	m.RefreshSchedulerEntry(second.ID)
+
+	primaryID := "pool-auth-" + t.Name()
+	for _, upstream := range []string{"upstream-a", "upstream-b"} {
+		m.MarkResult(context.Background(), Result{
+			AuthID:   primaryID,
+			Provider: "pool",
+			Model:    upstream,
+			Success:  false,
+			Error:    &Error{HTTPStatus: 429, Message: "quota"},
+		})
+	}
+
+	available, err := m.availableAuthsForRouteModel(m.List(), "pool", alias, time.Now())
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel error = %v", err)
+	}
+	for _, auth := range available {
+		if auth.ID == primaryID {
+			t.Fatalf("primary auth %q still available after all upstreams cooled", primaryID)
+		}
+	}
+	if len(available) == 0 {
+		t.Fatal("expected second auth still available")
+	}
+}
+
+func TestManager_OpenAICompatPoolPartialUpstreamCooldownStillSelectable(t *testing.T) {
+	t.Parallel()
+
+	alias := "alias-partial"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "upstream-a", Alias: alias},
+		{Name: "upstream-b", Alias: alias},
+	}, executor)
+
+	primaryID := "pool-auth-" + t.Name()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   primaryID,
+		Provider: "pool",
+		Model:    "upstream-a",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	available, err := m.availableAuthsForRouteModel(m.List(), "pool", alias, time.Now())
+	if err != nil {
+		t.Fatalf("availableAuthsForRouteModel error = %v", err)
+	}
+	found := false
+	var primary *Auth
+	for _, auth := range available {
+		if auth.ID == primaryID {
+			found = true
+			primary = auth
+		}
+	}
+	if !found || primary == nil {
+		t.Fatal("auth with one remaining ready upstream should still be selectable")
+	}
+	models := m.prepareExecutionModels(primary, alias)
+	if len(models) == 0 {
+		t.Fatal("prepareExecutionModels returned empty; expected remaining upstream")
+	}
+	for _, model := range models {
+		if model == "upstream-a" {
+			t.Fatalf("cooled upstream-a still in executable models: %v", models)
+		}
+	}
+}
+
+func TestManager_PartialPoolCooldownKeepsSessionAffinity(t *testing.T) {
+	t.Parallel()
+
+	alias := "alias-affinity-pool"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	// Build manager with affinity selector and multi-upstream pool.
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "upstream-a", Alias: alias},
+				{Name: "upstream-b", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, selector, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+	auth := &Auth{
+		ID:       "pool-affinity-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	m.RefreshSchedulerEntry(auth.ID)
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "session-pool-partial")
+	opts := cliproxyexecutor.Options{Headers: headers}
+
+	// Bind affinity.
+	first, _, err := m.pickNext(context.Background(), "pool", alias, opts, map[string]struct{}{})
+	if err != nil || first == nil {
+		t.Fatalf("first pick auth=%v err=%v", first, err)
+	}
+
+	liveAuth := func() *Auth {
+		for _, auth := range m.List() {
+			if auth != nil && auth.ID == first.ID {
+				return auth
+			}
+		}
+		t.Fatalf("live auth %q not found", first.ID)
+		return nil
+	}
+
+	// Cool only one upstream; route remains available via upstream-b.
+	m.MarkResult(context.Background(), Result{
+		AuthID:     first.ID,
+		Provider:   "pool",
+		Model:      "upstream-a",
+		RouteModel: alias,
+		Success:    false,
+		Error:      &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	// Route still available.
+	blocked, _, _ := m.routeModelAvailability(liveAuth(), alias, time.Now())
+	if blocked {
+		t.Fatal("route should remain available with one upstream ready")
+	}
+
+	// Affinity must still pin the same auth.
+	second, _, err := m.pickNext(context.Background(), "pool", alias, opts, map[string]struct{}{})
+	if err != nil || second == nil {
+		t.Fatalf("second pick auth=%v err=%v", second, err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("partial pool cooldown cleared affinity: first=%q second=%q", first.ID, second.ID)
+	}
+
+	// Cooling the last upstream should invalidate affinity for that auth.
+	m.MarkResult(context.Background(), Result{
+		AuthID:     first.ID,
+		Provider:   "pool",
+		Model:      "upstream-b",
+		RouteModel: alias,
+		Success:    false,
+		Error:      &Error{HTTPStatus: 429, Message: "quota"},
+	})
+	blocked, _, _ = m.routeModelAvailability(liveAuth(), alias, time.Now())
+	if !blocked {
+		t.Fatal("route should be blocked after all upstreams cool")
+	}
+	if selector.cache == nil {
+		t.Fatal("affinity cache missing")
+	}
+	// Cache key uses mixed/provider + session + model; pickNext uses provider "pool".
+	key := sessionAffinityCacheKey("pool", "session-pool-partial", alias)
+	if _, ok := selector.cache.Get(key); ok {
+		t.Fatalf("affinity binding still present after full route cooldown: key=%q", key)
 	}
 }

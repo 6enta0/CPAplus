@@ -662,3 +662,530 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestManager_SchedulerSeesCooldownWrittenWithThinkingSuffix(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	cooledID := "suffix-cool-" + t.Name()
+	readyID := "suffix-ready-" + t.Name()
+	model := "suffix-model-" + t.Name()
+	registerSchedulerModels(t, "gemini", model, cooledID, readyID)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: cooledID, Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(cooled) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: readyID, Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(ready) error = %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(cooledID)
+	manager.RefreshSchedulerEntry(readyID)
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   cooledID,
+		Provider: "gemini",
+		Model:    model + "(high)",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	manager.mu.RLock()
+	authA := manager.auths[cooledID]
+	if authA == nil {
+		manager.mu.RUnlock()
+		t.Fatal("cooled auth missing after MarkResult")
+	}
+	if _, ok := authA.ModelStates[model]; !ok {
+		manager.mu.RUnlock()
+		t.Fatalf("ModelStates keys = %v, want canonical key %q", authA.ModelStates, model)
+	}
+	if _, ok := authA.ModelStates[model+"(high)"]; ok {
+		manager.mu.RUnlock()
+		t.Fatalf("ModelStates still has suffix key %q", model+"(high)")
+	}
+	manager.mu.RUnlock()
+
+	for _, requestModel := range []string{model, model + "(high)", model + "(low)"} {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", requestModel, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown error = %v", requestModel, errPick)
+		}
+		if got == nil || got.ID != readyID {
+			t.Fatalf("scheduler.pickSingle(%q) after suffix cooldown auth = %v, want %q", requestModel, got, readyID)
+		}
+	}
+}
+
+func TestIsAuthBlockedForModel_LegacySuffixKeyVisibleViaCanonicalLookup(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model(high)": {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+
+	blocked, reason, _ := isAuthBlockedForModel(auth, "test-model", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true for legacy suffix-keyed cooldown")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+
+	// ensureModelState should migrate the legacy key.
+	state := ensureModelState(auth, "test-model(low)")
+	if state == nil {
+		t.Fatal("ensureModelState returned nil")
+	}
+	if _, ok := auth.ModelStates["test-model"]; !ok {
+		t.Fatalf("ModelStates keys = %v, want migrated canonical key", auth.ModelStates)
+	}
+	if _, ok := auth.ModelStates["test-model(high)"]; ok {
+		t.Fatalf("legacy suffix key still present: %v", auth.ModelStates)
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("migrated state lost cooldown: %+v", state)
+	}
+}
+
+func TestManager_SessionAffinityKeepsSchedulerMixedRotation(t *testing.T) {
+	t.Parallel()
+
+	// Weighted mixed rotation must remain active when session affinity wraps RR.
+	// gemini has 2 ready auths, claude has 1 → expected provider order gemini, claude, gemini, ...
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+
+	auths := []*Auth{
+		{ID: "gemini-a", Provider: "gemini"},
+		{ID: "gemini-b", Provider: "gemini"},
+		{ID: "claude-a", Provider: "claude"},
+	}
+	for _, auth := range auths {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	if !manager.useSchedulerFastPath() {
+		t.Fatal("useSchedulerFastPath() = false with session affinity over RoundRobin, want true")
+	}
+
+	// Weight = ready count: gemini=2, claude=1 → gemini, gemini, claude, gemini...
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	// Without session headers, picks should rotate via scheduler mixed weights.
+	for index := range wantProviders {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if provider != wantProviders[index] {
+			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
+		}
+		if got.ID != wantIDs[index] {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestManager_SessionAffinityPinsBoundAuthAndRebindsOnCooldown(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	registerSchedulerModels(t, "gemini", "test-model", "auth-a", "auth-b")
+
+	for _, id := range []string{"auth-a", "auth-b"} {
+		if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "gemini"}); err != nil {
+			t.Fatalf("Register(%s) error = %v", id, err)
+		}
+		manager.RefreshSchedulerEntry(id)
+	}
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "session-sticky-1")
+	opts := cliproxyexecutor.Options{Headers: headers}
+
+	first, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || first == nil {
+		t.Fatalf("first pickNext() auth=%v err=%v", first, errPick)
+	}
+	second, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || second == nil {
+		t.Fatalf("second pickNext() auth=%v err=%v", second, errPick)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("session affinity did not stick: first=%q second=%q", first.ID, second.ID)
+	}
+
+	// Cool down the sticky auth; next pick should rebind to the other credential.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   first.ID,
+		Provider: "gemini",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+
+	third, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || third == nil {
+		t.Fatalf("third pickNext() after cooldown auth=%v err=%v", third, errPick)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("expected rebind after sticky cooldown, still got %q", third.ID)
+	}
+
+	fourth, _, errPick := manager.pickNext(context.Background(), "gemini", "test-model", opts, map[string]struct{}{})
+	if errPick != nil || fourth == nil {
+		t.Fatalf("fourth pickNext() auth=%v err=%v", fourth, errPick)
+	}
+	if fourth.ID != third.ID {
+		t.Fatalf("rebound session did not stick: third=%q fourth=%q", third.ID, fourth.ID)
+	}
+}
+
+func TestManager_PickMissRefreshPreservesMixedCursors(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+
+	for _, auth := range []*Auth{
+		{ID: "gemini-a", Provider: "gemini"},
+		{ID: "gemini-b", Provider: "gemini"},
+		{ID: "claude-a", Provider: "claude"},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+	}
+
+	// Advance mixed rotation once so mixedCursors is non-zero.
+	if _, _, _, err := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil); err != nil {
+		t.Fatalf("warmup pickNextMixed error = %v", err)
+	}
+
+	manager.scheduler.mu.Lock()
+	var cursorBefore int
+	var cursorKey string
+	for key, value := range manager.scheduler.mixedCursors {
+		cursorKey = key
+		cursorBefore = value
+		break
+	}
+	manager.scheduler.mu.Unlock()
+	if cursorKey == "" || cursorBefore == 0 {
+		t.Fatalf("expected advanced mixed cursor, key=%q value=%d", cursorKey, cursorBefore)
+	}
+
+	// Soft refresh (pick-miss path) must preserve mixed cursors.
+	manager.refreshSchedulerOnPickMiss()
+
+	manager.scheduler.mu.Lock()
+	cursorAfter := manager.scheduler.mixedCursors[cursorKey]
+	manager.scheduler.mu.Unlock()
+	if cursorAfter != cursorBefore {
+		t.Fatalf("mixed cursor for %q = %d after refresh, want %d", cursorKey, cursorAfter, cursorBefore)
+	}
+
+	// Full rebuild still resets mixed cursors (selector/load paths).
+	manager.syncScheduler()
+	manager.scheduler.mu.Lock()
+	if len(manager.scheduler.mixedCursors) != 0 {
+		t.Fatalf("full syncScheduler should reset mixed cursors, got %v", manager.scheduler.mixedCursors)
+	}
+	manager.scheduler.mu.Unlock()
+}
+
+func TestManager_DisallowFreeAuthDoesNotAdvanceCursor(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+	registerSchedulerModels(t, "codex", "gpt-5", "codex-free-a", "codex-free-b", "codex-paid")
+
+	for _, auth := range []*Auth{
+		{ID: "codex-free-a", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-free-b", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+		manager.RefreshSchedulerEntry(auth.ID)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DisallowFreeAuthMetadataKey: true,
+	}}
+
+	for i := 0; i < 5; i++ {
+		got, _, err := manager.pickNext(context.Background(), "codex", "gpt-5", opts, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("pickNext #%d error = %v", i, err)
+		}
+		if got == nil || got.ID != "codex-paid" {
+			t.Fatalf("pickNext #%d auth = %v, want codex-paid", i, got)
+		}
+	}
+}
+
+func TestSchedulerMixedWeightsIgnoreDisallowedFreeAuths(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+	registerSchedulerModels(t, "codex", "gpt-5", "codex-free-a", "codex-free-b", "codex-paid")
+	registerSchedulerModels(t, "claude", "gpt-5", "claude-a")
+
+	for _, auth := range []*Auth{
+		{ID: "codex-free-a", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-free-b", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+		{ID: "codex-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}},
+		{ID: "claude-a", Provider: "claude"},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, err)
+		}
+		manager.RefreshSchedulerEntry(auth.ID)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DisallowFreeAuthMetadataKey: true,
+	}}
+
+	providers := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		got, _, provider, err := manager.pickNextMixed(context.Background(), []string{"codex", "claude"}, "gpt-5", opts, map[string]struct{}{})
+		if err != nil {
+			t.Fatalf("pickNextMixed #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed #%d auth = nil", i)
+		}
+		if provider == "codex" && got.ID != "codex-paid" {
+			t.Fatalf("pickNextMixed #%d selected free codex %q", i, got.ID)
+		}
+		providers = append(providers, provider)
+	}
+	want := []string{"codex", "claude", "codex", "claude"}
+	for i := range want {
+		if providers[i] != want[i] {
+			t.Fatalf("providers = %v, want %v (free must not inflate codex weight)", providers, want)
+		}
+	}
+}
+
+func TestSchedulerPickMixed_PrefersWebsocketAcrossProviders(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "claude-a", Provider: "claude"},
+	)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	// With equal ready counts and WS preference on codex, codex should still participate
+	// and prefer websocket-enabled auth when codex is selected.
+	seenCodex := map[string]int{}
+	for i := 0; i < 6; i++ {
+		got, provider, err := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if err != nil {
+			t.Fatalf("pickMixed #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed #%d auth = nil", i)
+		}
+		if provider == "codex" {
+			seenCodex[got.ID]++
+		}
+	}
+	if seenCodex["codex-http"] != 0 {
+		t.Fatalf("expected websocket preference to skip codex-http, got counts %v", seenCodex)
+	}
+	if seenCodex["codex-ws"] == 0 {
+		t.Fatalf("expected codex-ws to be selected, got counts %v", seenCodex)
+	}
+}
+
+func TestSchedulerPickMixed_FallsBackToHTTPWhenWebsocketTried(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "claude-a", Provider: "claude"},
+	)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	tried := map[string]struct{}{
+		"codex-ws": {},
+		"claude-a": {},
+	}
+
+	got, provider, err := scheduler.pickMixed(ctx, []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, tried)
+	if err != nil {
+		t.Fatalf("pickMixed error = %v, want HTTP fallback", err)
+	}
+	if provider != "codex" {
+		t.Fatalf("provider = %q, want codex", provider)
+	}
+	if got == nil || got.ID != "codex-http" {
+		t.Fatalf("auth = %v, want codex-http", got)
+	}
+}
+
+func TestManager_ResyncPreservesPerModelRoundRobinOrder(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	registerSchedulerModels(t, "gemini", "rr-model", "rr-a", "rr-b")
+	for _, id := range []string{"rr-a", "rr-b"} {
+		if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "gemini"}); err != nil {
+			t.Fatalf("Register(%s) error = %v", id, err)
+		}
+		manager.RefreshSchedulerEntry(id)
+	}
+
+	first, _, err := manager.pickNext(context.Background(), "gemini", "rr-model", cliproxyexecutor.Options{}, nil)
+	if err != nil || first == nil {
+		t.Fatalf("first pick auth=%v err=%v", first, err)
+	}
+
+	manager.refreshSchedulerOnPickMiss()
+
+	second, _, err := manager.pickNext(context.Background(), "gemini", "rr-model", cliproxyexecutor.Options{}, nil)
+	if err != nil || second == nil {
+		t.Fatalf("second pick auth=%v err=%v", second, err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("resync reset per-model RR cursor: first=%q second=%q", first.ID, second.ID)
+	}
+}
+
+func TestManager_RequestScopedFailureKeepsSessionAffinity(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	registerSchedulerModels(t, "gemini", "sticky-model", "sticky-a", "sticky-b")
+	for _, id := range []string{"sticky-a", "sticky-b"} {
+		if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "gemini"}); err != nil {
+			t.Fatalf("Register(%s) error = %v", id, err)
+		}
+		manager.RefreshSchedulerEntry(id)
+	}
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "session-keep-on-400")
+	opts := cliproxyexecutor.Options{Headers: headers}
+
+	first, _, err := manager.pickNext(context.Background(), "gemini", "sticky-model", opts, map[string]struct{}{})
+	if err != nil || first == nil {
+		t.Fatalf("first pick auth=%v err=%v", first, err)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   first.ID,
+		Provider: "gemini",
+		Model:    "sticky-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 400, Message: "bad request", Code: requestScopedErrorCode},
+	})
+
+	second, _, err := manager.pickNext(context.Background(), "gemini", "sticky-model", opts, map[string]struct{}{})
+	if err != nil || second == nil {
+		t.Fatalf("second pick auth=%v err=%v", second, err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("request-scoped failure broke affinity: first=%q second=%q", first.ID, second.ID)
+	}
+}
+
+type recordingModelSelector struct {
+	lastModel string
+	fallback  Selector
+}
+
+func (s *recordingModelSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	s.lastModel = model
+	if s.fallback == nil {
+		s.fallback = &RoundRobinSelector{}
+	}
+	return s.fallback.Pick(ctx, provider, model, opts, auths)
+}
+
+func TestManager_CustomSelectorReceivesRouteModelNotUpstreamAlias(t *testing.T) {
+	t.Parallel()
+
+	const (
+		provider    = "antigravity"
+		routeModel  = "claude-opus-route"
+		targetModel = "claude-opus-upstream"
+	)
+
+	recorder := &recordingModelSelector{fallback: &RoundRobinSelector{}}
+	manager := NewManager(nil, recorder, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: provider})
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{
+			Name:  targetModel,
+			Alias: routeModel,
+			Fork:  true,
+		}},
+	})
+
+	auth := &Auth{ID: "alias-custom-auth", Provider: provider, Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	// Force legacy path via route-aware selection (alias differs from route).
+	got, _, err := manager.pickNext(context.Background(), provider, routeModel, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if err != nil || got == nil {
+		t.Fatalf("pickNext auth=%v err=%v", got, err)
+	}
+	if recorder.lastModel != routeModel {
+		t.Fatalf("custom selector model = %q, want route model %q", recorder.lastModel, routeModel)
+	}
+}

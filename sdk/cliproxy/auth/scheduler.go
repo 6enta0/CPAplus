@@ -175,7 +175,7 @@ func newAuthScheduler(selector Selector) *authScheduler {
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
 func selectorStrategy(selector Selector) schedulerStrategy {
-	switch selector.(type) {
+	switch unwrapSelector(selector).(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case nil, *RoundRobinSelector:
@@ -208,6 +208,7 @@ func (s *authScheduler) setSelector(selector Selector) {
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
+// Mixed-provider and per-model cursors are intentionally reset (selector/strategy/load paths).
 func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
 		return
@@ -220,6 +221,34 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
+	}
+}
+
+// resync surgically refreshes auth readiness from a snapshot without tearing down
+// provider/model shards. Existing ready-view RR cursors and mixedCursors are kept.
+func (s *authScheduler) resync(auths []*Auth) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	keep := make(map[string]struct{}, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		authID := strings.TrimSpace(auth.ID)
+		if authID == "" {
+			continue
+		}
+		keep[authID] = struct{}{}
+		s.upsertAuthLocked(auth, now)
+	}
+	for authID := range s.authProviders {
+		if _, ok := keep[authID]; !ok {
+			s.removeAuthLocked(authID)
+		}
 	}
 }
 
@@ -275,20 +304,8 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	predicate := func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil {
-			return false
-		}
-		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
-			return false
-		}
-		if len(tried) > 0 {
-			if _, ok := tried[entry.auth.ID]; ok {
-				return false
-			}
-		}
-		return true
-	}
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	predicate := selectionPredicate(tried, pinnedAuthID, disallowFreeAuth)
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
@@ -365,8 +382,11 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := triedPredicate(tried)
+	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	predicate := selectionPredicate(tried, pinnedAuthID, disallowFreeAuth)
 	candidateShards := make([]*modelScheduler, len(normalized))
+	preferWebsocketByProvider := make([]bool, len(normalized))
+	downstreamWS := cliproxyexecutor.DownstreamWebsocket(ctx) && pinnedAuthID == ""
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
@@ -380,7 +400,9 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		preferWS := downstreamWS && providerPrefersWebsocketTransport(providerKey)
+		preferWebsocketByProvider[providerIndex] = preferWS
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWS, predicate)
 		if !okPriority {
 			continue
 		}
@@ -399,7 +421,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -415,7 +437,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, predicate)
 		}
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
@@ -453,7 +475,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(preferWebsocketByProvider[providerIndex], bestPriority, schedulerStrategyRoundRobin, predicate)
 		if picked == nil {
 			continue
 		}
@@ -500,15 +522,29 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 
 // triedPredicate builds a filter that excludes auths already attempted for the current request.
 func triedPredicate(tried map[string]struct{}) func(*scheduledAuth) bool {
-	if len(tried) == 0 {
-		return func(entry *scheduledAuth) bool { return entry != nil && entry.auth != nil }
-	}
+	return selectionPredicate(tried, "", false)
+}
+
+// selectionPredicate builds the hot-path filter for scheduler picks: exclude tried IDs,
+// optional pin, and free Codex auths when the request disallows them.
+func selectionPredicate(tried map[string]struct{}, pinnedAuthID string, disallowFreeAuth bool) func(*scheduledAuth) bool {
+	pinnedAuthID = strings.TrimSpace(pinnedAuthID)
 	return func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		_, ok := tried[entry.auth.ID]
-		return !ok
+		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+			return false
+		}
+		if len(tried) > 0 {
+			if _, ok := tried[entry.auth.ID]; ok {
+				return false
+			}
+		}
+		if disallowFreeAuth && isFreeCodexAuth(entry.auth) {
+			return false
+		}
+		return true
 	}
 }
 
@@ -836,6 +872,16 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	return 0, false
 }
 
+// preferWebsocketReadyView reports whether the websocket-only ready view still has a
+// candidate that satisfies predicate. Callers must fall back to the full ready view
+// when this is false so HTTP credentials remain reachable after WS auths are tried.
+func preferWebsocketReadyView(bucket *readyBucket, preferWebsocket bool, predicate func(*scheduledAuth) bool) bool {
+	if !preferWebsocket || bucket == nil {
+		return false
+	}
+	return bucket.ws.pickFirst(predicate) != nil
+}
+
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
 func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
@@ -847,7 +893,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	view := &bucket.all
-	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+	if preferWebsocketReadyView(bucket, preferWebsocket, predicate) {
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth
@@ -862,7 +908,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
 	if m == nil {
 		return 0
 	}
@@ -870,10 +916,20 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	if bucket == nil {
 		return 0
 	}
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		return len(bucket.ws.flat)
+	view := bucket.all
+	if preferWebsocketReadyView(bucket, preferWebsocket, predicate) {
+		view = bucket.ws
 	}
-	return len(bucket.all.flat)
+	if predicate == nil {
+		return len(view.flat)
+	}
+	count := 0
+	for _, entry := range view.flat {
+		if predicate(entry) {
+			count++
+		}
+	}
+	return count
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
