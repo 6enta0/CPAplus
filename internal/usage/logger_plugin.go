@@ -657,14 +657,13 @@ func (s *RequestStatistics) PruneOlderThan(retentionDays int) (deletedDB int64, 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 	prunedMemory = s.PruneDetailsOlderThan(cutoff)
 
-	// Persist pruned-only baseline, then delete old SQLite detail rows.
-	// Boot: ApplyUsageBaseline(pruned-only) + Load remaining details.
+	// Persist pruned-only baseline and delete old SQLite detail rows in one
+	// transaction so a crash cannot leave baseline advanced with old rows still
+	// present (double-count on boot). Boot: ApplyUsageBaseline(pruned-only) +
+	// Load remaining details → all-time = baseline + remaining.
 	if s.sqliteStore != nil {
 		baseline := s.CaptureUsageBaseline()
-		if errSave := s.sqliteStore.SaveUsageBaseline(baseline); errSave != nil {
-			return 0, prunedMemory, errSave
-		}
-		deletedDB, err = s.sqliteStore.DeleteOlderThan(cutoff)
+		deletedDB, err = s.sqliteStore.CommitRetentionPrune(baseline, cutoff)
 		if err != nil {
 			return deletedDB, prunedMemory, err
 		}

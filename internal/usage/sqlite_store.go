@@ -703,15 +703,7 @@ func (s *SQLiteStore) DeleteOlderThan(before time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Match InsertRecord's fixed-width layout so lexicographic string compare
-	// stays consistent for same-second fractional timestamps.
-	cutoff := before.UTC().Format(usageTimestampLayout)
-	res, err := s.db.Exec(`DELETE FROM usage_records WHERE timestamp < ?`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("usage db: delete failed: %w", err)
-	}
-	affected, _ := res.RowsAffected()
-	return affected, nil
+	return deleteUsageRecordsOlderThan(s.db, before)
 }
 
 // UsageBaseline is the cumulative totals preserved across detail retention.
@@ -726,10 +718,50 @@ type UsageBaseline struct {
 	UpdatedAt     time.Time                   `json:"updated_at"`
 }
 
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// CommitRetentionPrune persists the pruned-only baseline and deletes detail rows
+// older than before in one SQLite transaction. This closes the
+// save-baseline-then-crash-before-delete window that would double-count on boot
+// (ApplyUsageBaseline + reload still-present old rows).
+func (s *SQLiteStore) CommitRetentionPrune(baseline UsageBaseline, before time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("usage db: begin retention prune failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err = saveUsageBaselineTx(tx, baseline); err != nil {
+		return 0, err
+	}
+	deleted, err := deleteUsageRecordsOlderThan(tx, before)
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("usage db: commit retention prune failed: %w", err)
+	}
+	return deleted, nil
+}
+
 func (s *SQLiteStore) SaveUsageBaseline(baseline UsageBaseline) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return saveUsageBaselineTx(s.db, baseline)
+}
+
+func saveUsageBaselineTx(exec sqlExecer, baseline UsageBaseline) error {
 	if baseline.ByAuthIndex == nil {
 		baseline.ByAuthIndex = map[string]KeyStatBucket{}
 	}
@@ -756,9 +788,7 @@ func (s *SQLiteStore) SaveUsageBaseline(baseline UsageBaseline) error {
 		updatedAt = time.Now().UTC()
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err = s.db.Exec(`
+	_, err = exec.Exec(`
 		INSERT INTO usage_stats_baseline (
 			id, total_requests, success_count, failure_count, total_tokens,
 			by_auth_index_json, by_source_json, model_summary_json, updated_at
@@ -778,6 +808,18 @@ func (s *SQLiteStore) SaveUsageBaseline(baseline UsageBaseline) error {
 		return fmt.Errorf("usage db: save baseline failed: %w", err)
 	}
 	return nil
+}
+
+func deleteUsageRecordsOlderThan(exec sqlExecer, before time.Time) (int64, error) {
+	// Match InsertRecord's fixed-width layout so lexicographic string compare
+	// stays consistent for same-second fractional timestamps.
+	cutoff := before.UTC().Format(usageTimestampLayout)
+	res, err := exec.Exec(`DELETE FROM usage_records WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("usage db: delete failed: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
 }
 
 func (s *SQLiteStore) LoadUsageBaseline() (UsageBaseline, error) {

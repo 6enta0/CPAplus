@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -422,5 +423,119 @@ func TestExportImportIsRemainingWindowOnly(t *testing.T) {
 	importedDetails := imported.Snapshot().APIs["api-a"].Models["model-a"].Details
 	if len(importedDetails) != 1 {
 		t.Fatalf("post-import details = %d, want 1", len(importedDetails))
+	}
+}
+
+// TestPruneOlderThanPersistsAtomicallyAcrossRestart proves the P0 fix path:
+// PruneOlderThan commits baseline + DELETE in one transaction, so a simulated
+// restart (ApplyUsageBaseline + LoadFromSQLite) does not double-count.
+func TestPruneOlderThanPersistsAtomicallyAcrossRestart(t *testing.T) {
+	prevEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(true)
+	defer SetStatisticsEnabled(prevEnabled)
+
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("open usage db: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.SetSQLiteStore(store)
+
+	now := time.Now()
+	oldRec := coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-48 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 10},
+	}
+	recentRec := coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-1 * time.Hour),
+		Failed:      true,
+		Detail:      coreusage.Detail{TotalTokens: 3},
+	}
+
+	// Mirror production: in-memory stats + sqlite plugin insert.
+	stats.Record(context.Background(), oldRec)
+	store.InsertRecord(oldRec)
+	stats.Record(context.Background(), recentRec)
+	store.InsertRecord(recentRec)
+
+	before := stats.KeyStats()
+	if before.TotalRequests != 2 || before.SuccessCount != 1 || before.FailureCount != 1 || before.TotalTokens != 13 {
+		t.Fatalf("pre-prune all-time = %+v", before)
+	}
+
+	deletedDB, prunedMem, err := stats.PruneOlderThan(1)
+	if err != nil {
+		t.Fatalf("PruneOlderThan: %v", err)
+	}
+	if prunedMem != 1 {
+		t.Fatalf("prunedMem = %d, want 1", prunedMem)
+	}
+	if deletedDB != 1 {
+		t.Fatalf("deletedDB = %d, want 1", deletedDB)
+	}
+
+	afterPrune := stats.KeyStats()
+	if afterPrune.TotalRequests != 2 || afterPrune.TotalTokens != 13 {
+		t.Fatalf("runtime all-time dipped after prune: %+v", afterPrune)
+	}
+
+	if errClose := store.Close(); errClose != nil {
+		t.Fatalf("close store: %v", errClose)
+	}
+
+	// Simulate process restart against the same DB.
+	reopened, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen usage db: %v", err)
+	}
+	defer func() {
+		if errClose := reopened.Close(); errClose != nil {
+			t.Errorf("close reopened store: %v", errClose)
+		}
+	}()
+
+	baseline, err := reopened.LoadUsageBaseline()
+	if err != nil {
+		t.Fatalf("LoadUsageBaseline: %v", err)
+	}
+	if baseline.TotalRequests != 1 || baseline.SuccessCount != 1 || baseline.FailureCount != 0 || baseline.TotalTokens != 10 {
+		t.Fatalf("persisted baseline must be pruned-only, got req=%d success=%d failure=%d tokens=%d",
+			baseline.TotalRequests, baseline.SuccessCount, baseline.FailureCount, baseline.TotalTokens)
+	}
+
+	remaining, err := reopened.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("remaining rows = %d, want 1 (double-count window would leave old row too)", len(remaining))
+	}
+	if remaining[0].TotalTokens != 3 {
+		t.Fatalf("remaining tokens = %d, want 3", remaining[0].TotalTokens)
+	}
+
+	restarted := NewRequestStatistics()
+	restarted.ApplyUsageBaseline(baseline)
+	if errLoad := LoadFromSQLite(restarted, reopened); errLoad != nil {
+		t.Fatalf("LoadFromSQLite: %v", errLoad)
+	}
+
+	afterRestart := restarted.KeyStats()
+	if afterRestart.TotalRequests != 2 || afterRestart.SuccessCount != 1 || afterRestart.FailureCount != 1 || afterRestart.TotalTokens != 13 {
+		t.Fatalf("post-restart all-time = req=%d success=%d failure=%d tokens=%d, want 2/1/1/13 (3 would mean double-count)",
+			afterRestart.TotalRequests, afterRestart.SuccessCount, afterRestart.FailureCount, afterRestart.TotalTokens)
+	}
+	if afterRestart.ByAuthIndex["auth-1"].Success != 1 || afterRestart.ByAuthIndex["auth-1"].Failure != 1 || afterRestart.ByAuthIndex["auth-1"].Tokens != 13 {
+		t.Fatalf("post-restart auth-1 = %+v", afterRestart.ByAuthIndex["auth-1"])
 	}
 }

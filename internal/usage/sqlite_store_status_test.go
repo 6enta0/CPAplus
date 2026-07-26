@@ -186,3 +186,85 @@ func TestSQLitePluginResolvesUnknownStatusFromRequestContext(t *testing.T) {
 		t.Fatalf("outcome = (%d, %q), want (500, upstream failed)", records[0].StatusCode, records[0].ErrorMessage)
 	}
 }
+
+// TestCommitRetentionPruneSavesBaselineAndDeletesRows locks baseline upsert +
+// old-row delete into one transaction (P0 atomicity).
+func TestCommitRetentionPruneSavesBaselineAndDeletesRows(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("open usage db: %v", err)
+	}
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Errorf("close store: %v", errClose)
+		}
+	}()
+
+	cutoff := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	store.InsertRecord(coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "keep-model",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: cutoff.Add(time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 3},
+	})
+	store.InsertRecord(coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "drop-model",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: cutoff.Add(-time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 10},
+	})
+
+	baseline := UsageBaseline{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		FailureCount:  0,
+		TotalTokens:   10,
+		ByAuthIndex: map[string]KeyStatBucket{
+			"auth-1": {Success: 1, Tokens: 10},
+		},
+		BySource: map[string]KeyStatBucket{
+			"source-a": {Success: 1, Tokens: 10},
+		},
+		ModelSummary: map[string]SummaryModelStat{
+			"drop-model": {Model: "drop-model", TotalRequests: 1, SuccessCount: 1, TotalTokens: 10},
+		},
+		UpdatedAt: cutoff,
+	}
+
+	deleted, err := store.CommitRetentionPrune(baseline, cutoff)
+	if err != nil {
+		t.Fatalf("CommitRetentionPrune: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+
+	loaded, err := store.LoadUsageBaseline()
+	if err != nil {
+		t.Fatalf("LoadUsageBaseline: %v", err)
+	}
+	if loaded.TotalRequests != 1 || loaded.TotalTokens != 10 || loaded.SuccessCount != 1 {
+		t.Fatalf("loaded baseline = %+v, want pruned-only 1/1/0/10", loaded)
+	}
+	if loaded.ByAuthIndex["auth-1"].Success != 1 || loaded.ByAuthIndex["auth-1"].Tokens != 10 {
+		t.Fatalf("loaded auth baseline = %+v", loaded.ByAuthIndex["auth-1"])
+	}
+	if m := loaded.ModelSummary["drop-model"]; m.TotalRequests != 1 || m.TotalTokens != 10 {
+		t.Fatalf("loaded model baseline = %+v", m)
+	}
+
+	records, err := store.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("remaining records = %d, want 1", len(records))
+	}
+	if records[0].Model != "keep-model" || records[0].TotalTokens != 3 {
+		t.Fatalf("remaining = %+v, want keep-model/3", records[0])
+	}
+}
