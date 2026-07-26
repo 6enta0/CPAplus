@@ -11,12 +11,21 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
+// usageExportPayload is the versioned export body.
+// Version 1 is a remaining-window detail snapshot: usage.apis[*].models[*].details
+// only includes details still held in memory/SQLite. Top-level totals may still
+// reflect process all-time (baseline + remaining) when retention has pruned
+// older rows; those totals are informational and are NOT restored on import.
+// A future version may add an explicit baseline field for migratable all-time.
 type usageExportPayload struct {
 	Version    int                      `json:"version"`
 	ExportedAt time.Time                `json:"exported_at"`
 	Usage      usage.StatisticsSnapshot `json:"usage"`
 }
 
+// usageImportPayload accepts version 0 (legacy raw) or 1.
+// Import always merges details only via MergeSnapshot; it never applies
+// baseline or invents pruned history from export totals.
 type usageImportPayload struct {
 	Version int                      `json:"version"`
 	Usage   usage.StatisticsSnapshot `json:"usage"`
@@ -277,6 +286,8 @@ func parseUsageSnapshotOptions(c *gin.Context) (usage.SnapshotOptions, error) {
 	return options, nil
 }
 
+// ExportUsageStatistics returns a version-1 remaining-window detail snapshot.
+// See usageExportPayload for retention semantics (totals vs details).
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
@@ -289,6 +300,8 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	})
 }
 
+// ImportUsageStatistics merges remaining-window details from a version 0/1 export.
+// It does not restore pruned baseline aggregates from export totals.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usageStats == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})

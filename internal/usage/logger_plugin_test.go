@@ -359,3 +359,68 @@ func TestUsageOutcomeDetailsSurviveSnapshotAndImport(t *testing.T) {
 		t.Fatalf("merge result = %+v, want one distinct outcome added", result)
 	}
 }
+
+// TestExportImportIsRemainingWindowOnly locks option A: after retention prune,
+// Snapshot (export body) keeps process all-time totals but only remaining
+// details. MergeSnapshot into a fresh process restores those details only —
+// it must not invent baseline from export totals.
+func TestExportImportIsRemainingWindowOnly(t *testing.T) {
+	prevEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(true)
+	defer SetStatisticsEnabled(prevEnabled)
+
+	stats := NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-48 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 10},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-1 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 3},
+	})
+
+	if pruned := stats.PruneDetailsOlderThan(now.Add(-24 * time.Hour)); pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+
+	exported := stats.Snapshot()
+	if exported.TotalRequests != 2 || exported.TotalTokens != 13 {
+		t.Fatalf("export totals = req=%d tokens=%d, want all-time 2/13", exported.TotalRequests, exported.TotalTokens)
+	}
+	details := exported.APIs["api-a"].Models["model-a"].Details
+	if len(details) != 1 {
+		t.Fatalf("export details = %d, want remaining-window 1", len(details))
+	}
+	if details[0].Tokens.TotalTokens != 3 {
+		t.Fatalf("export detail tokens = %d, want 3", details[0].Tokens.TotalTokens)
+	}
+
+	// Import into a fresh process: only remaining details come back.
+	imported := NewRequestStatistics()
+	merge := imported.MergeSnapshot(exported)
+	if merge.Added != 1 || merge.Skipped != 0 {
+		t.Fatalf("merge = %+v, want added=1 skipped=0", merge)
+	}
+	after := imported.KeyStats()
+	if after.TotalRequests != 1 || after.TotalTokens != 3 {
+		t.Fatalf("post-import all-time = req=%d tokens=%d, want remaining-only 1/3 (not invented 2/13)",
+			after.TotalRequests, after.TotalTokens)
+	}
+	if imported.baselineTotalRequests != 0 || imported.baselineTotalTokens != 0 {
+		t.Fatalf("import must not seed baseline from export totals: baseline req=%d tokens=%d",
+			imported.baselineTotalRequests, imported.baselineTotalTokens)
+	}
+	importedDetails := imported.Snapshot().APIs["api-a"].Models["model-a"].Details
+	if len(importedDetails) != 1 {
+		t.Fatalf("post-import details = %d, want 1", len(importedDetails))
+	}
+}

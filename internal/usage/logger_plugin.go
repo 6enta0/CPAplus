@@ -672,6 +672,10 @@ func (s *RequestStatistics) PruneOlderThan(retentionDays int) (deletedDB int64, 
 	return deletedDB, prunedMemory, nil
 }
 
+// Snapshot returns the unscoped statistics view used by management export.
+// Top-level totals are process all-time (baseline + remaining). Details under
+// APIs are only the remaining in-memory window after retention prune. Import
+// (MergeSnapshot) restores details only — see management-usage-stats-contract §7.1.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return s.SnapshotWithOptions(SnapshotOptions{})
 }
