@@ -51,11 +51,15 @@ type RequestStatistics struct {
 	totalTokens   int64
 
 	// Baseline cumulative totals from pruned history (persisted separately).
-	// All-time counters = baseline + remaining in-window details.
+	// Semantics: pruned-only history. Boot reconstructs:
+	//   all-time = baseline(pruned) + remaining(details still loaded).
 	baselineTotalRequests int64
 	baselineSuccessCount  int64
 	baselineFailureCount  int64
 	baselineTotalTokens   int64
+	baselineByAuthIndex   map[string]KeyStatBucket
+	baselineBySource      map[string]KeyStatBucket
+	baselineModelSummary  map[string]SummaryModelStat
 
 	apis map[string]*apiStats
 
@@ -252,14 +256,17 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:                make(map[string]*apiStats),
-		keyStatsByAuthIndex: make(map[string]KeyStatBucket),
-		keyStatsBySource:    make(map[string]KeyStatBucket),
-		modelSummary:        make(map[string]*SummaryModelStat),
-		requestsByDay:       make(map[string]int64),
-		requestsByHour:      make(map[int]int64),
-		tokensByDay:         make(map[string]int64),
-		tokensByHour:        make(map[int]int64),
+		apis:                 make(map[string]*apiStats),
+		baselineByAuthIndex:  make(map[string]KeyStatBucket),
+		baselineBySource:     make(map[string]KeyStatBucket),
+		baselineModelSummary: make(map[string]SummaryModelStat),
+		keyStatsByAuthIndex:  make(map[string]KeyStatBucket),
+		keyStatsBySource:     make(map[string]KeyStatBucket),
+		modelSummary:         make(map[string]*SummaryModelStat),
+		requestsByDay:        make(map[string]int64),
+		requestsByHour:       make(map[int]int64),
+		tokensByDay:          make(map[string]int64),
+		tokensByHour:         make(map[int]int64),
 	}
 }
 
@@ -410,8 +417,9 @@ func cloneKeyStatBuckets(src map[string]KeyStatBucket) map[string]KeyStatBucket 
 	return out
 }
 
-// ApplyUsageBaseline seeds all-time counters from a persisted baseline.
+// ApplyUsageBaseline seeds pruned-only baseline state and all-time counters.
 // Call before loading remaining detail rows from SQLite. Caller should not hold s.mu.
+// Remaining rows must then be loaded so all-time becomes baseline + remaining.
 func (s *RequestStatistics) ApplyUsageBaseline(baseline UsageBaseline) {
 	if s == nil {
 		return
@@ -423,6 +431,9 @@ func (s *RequestStatistics) ApplyUsageBaseline(baseline UsageBaseline) {
 	s.baselineSuccessCount = baseline.SuccessCount
 	s.baselineFailureCount = baseline.FailureCount
 	s.baselineTotalTokens = baseline.TotalTokens
+	s.baselineByAuthIndex = cloneKeyStatBuckets(baseline.ByAuthIndex)
+	s.baselineBySource = cloneKeyStatBuckets(baseline.BySource)
+	s.baselineModelSummary = cloneSummaryModelStats(baseline.ModelSummary)
 
 	s.totalRequests = baseline.TotalRequests
 	s.successCount = baseline.SuccessCount
@@ -453,7 +464,8 @@ func (s *RequestStatistics) ApplyUsageBaseline(baseline UsageBaseline) {
 	}
 }
 
-// CaptureUsageBaseline returns the current all-time counters as a baseline snapshot.
+// CaptureUsageBaseline returns the pruned-only baseline snapshot for persistence.
+// It must NOT include remaining in-memory details; boot reloads those separately.
 func (s *RequestStatistics) CaptureUsageBaseline() UsageBaseline {
 	if s == nil {
 		return UsageBaseline{}
@@ -461,22 +473,65 @@ func (s *RequestStatistics) CaptureUsageBaseline() UsageBaseline {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	models := make(map[string]SummaryModelStat, len(s.modelSummary))
-	for k, v := range s.modelSummary {
+	return UsageBaseline{
+		TotalRequests: s.baselineTotalRequests,
+		SuccessCount:  s.baselineSuccessCount,
+		FailureCount:  s.baselineFailureCount,
+		TotalTokens:   s.baselineTotalTokens,
+		ByAuthIndex:   cloneKeyStatBuckets(s.baselineByAuthIndex),
+		BySource:      cloneKeyStatBuckets(s.baselineBySource),
+		ModelSummary:  cloneSummaryModelStats(s.baselineModelSummary),
+		UpdatedAt:     time.Now().UTC(),
+	}
+}
+
+func cloneSummaryModelStats(src map[string]SummaryModelStat) map[string]SummaryModelStat {
+	if len(src) == 0 {
+		return make(map[string]SummaryModelStat)
+	}
+	out := make(map[string]SummaryModelStat, len(src))
+	for k, v := range src {
+		if strings.TrimSpace(v.Model) == "" {
+			v.Model = k
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func mergeKeyStatBuckets(dst map[string]KeyStatBucket, src map[string]KeyStatBucket) {
+	if dst == nil || len(src) == 0 {
+		return
+	}
+	for k, v := range src {
+		b := dst[k]
+		b.Success += v.Success
+		b.Failure += v.Failure
+		b.Tokens += v.Tokens
+		dst[k] = b
+	}
+}
+
+func mergeBaselineModelSummary(dst map[string]SummaryModelStat, src map[string]*SummaryModelStat) {
+	if dst == nil || len(src) == 0 {
+		return
+	}
+	for k, v := range src {
 		if v == nil {
 			continue
 		}
-		models[k] = *v
-	}
-	return UsageBaseline{
-		TotalRequests: s.totalRequests,
-		SuccessCount:  s.successCount,
-		FailureCount:  s.failureCount,
-		TotalTokens:   s.totalTokens,
-		ByAuthIndex:   cloneKeyStatBuckets(s.keyStatsByAuthIndex),
-		BySource:      cloneKeyStatBuckets(s.keyStatsBySource),
-		ModelSummary:  models,
-		UpdatedAt:     time.Now().UTC(),
+		entry := dst[k]
+		if strings.TrimSpace(entry.Model) == "" {
+			entry.Model = v.Model
+		}
+		if strings.TrimSpace(entry.Model) == "" {
+			entry.Model = k
+		}
+		entry.TotalRequests += v.TotalRequests
+		entry.SuccessCount += v.SuccessCount
+		entry.FailureCount += v.FailureCount
+		entry.TotalTokens += v.TotalTokens
+		dst[k] = entry
 	}
 }
 
@@ -572,11 +627,24 @@ func (s *RequestStatistics) PruneDetailsOlderThan(cutoff time.Time) int {
 		}
 	}
 
-	// Move dropped history into baseline so boot after prune can restore all-time totals.
+	// Move dropped history into pruned-only baseline. In-process all-time counters
+	// stay unchanged so range=all does not dip during runtime.
+	if s.baselineByAuthIndex == nil {
+		s.baselineByAuthIndex = make(map[string]KeyStatBucket)
+	}
+	if s.baselineBySource == nil {
+		s.baselineBySource = make(map[string]KeyStatBucket)
+	}
+	if s.baselineModelSummary == nil {
+		s.baselineModelSummary = make(map[string]SummaryModelStat)
+	}
 	s.baselineTotalRequests += dropRequests
 	s.baselineSuccessCount += dropSuccess
 	s.baselineFailureCount += dropFailure
 	s.baselineTotalTokens += dropTokens
+	mergeKeyStatBuckets(s.baselineByAuthIndex, dropByAuth)
+	mergeKeyStatBuckets(s.baselineBySource, dropBySource)
+	mergeBaselineModelSummary(s.baselineModelSummary, dropModels)
 	return pruned
 }
 
@@ -589,8 +657,8 @@ func (s *RequestStatistics) PruneOlderThan(retentionDays int) (deletedDB int64, 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 	prunedMemory = s.PruneDetailsOlderThan(cutoff)
 
-	// Persist baseline from current all-time counters (includes pruned history),
-	// then delete old SQLite detail rows.
+	// Persist pruned-only baseline, then delete old SQLite detail rows.
+	// Boot: ApplyUsageBaseline(pruned-only) + Load remaining details.
 	if s.sqliteStore != nil {
 		baseline := s.CaptureUsageBaseline()
 		if errSave := s.sqliteStore.SaveUsageBaseline(baseline); errSave != nil {

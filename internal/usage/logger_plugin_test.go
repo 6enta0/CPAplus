@@ -204,6 +204,121 @@ func TestPruneDetailsOlderThanKeepsAllTimeCounters(t *testing.T) {
 	if stats.baselineTotalRequests != 1 || stats.baselineTotalTokens != 10 {
 		t.Fatalf("baseline = req=%d tokens=%d", stats.baselineTotalRequests, stats.baselineTotalTokens)
 	}
+	// Capture must be pruned-only (not full all-time).
+	captured := stats.CaptureUsageBaseline()
+	if captured.TotalRequests != 1 || captured.TotalTokens != 10 {
+		t.Fatalf("captured baseline = req=%d tokens=%d, want pruned-only 1/10", captured.TotalRequests, captured.TotalTokens)
+	}
+	if captured.ByAuthIndex["auth-1"].Success != 1 || captured.ByAuthIndex["auth-1"].Tokens != 10 {
+		t.Fatalf("captured auth baseline = %+v", captured.ByAuthIndex["auth-1"])
+	}
+	if captured.BySource["source-a"].Success != 1 || captured.BySource["source-a"].Tokens != 10 {
+		t.Fatalf("captured source baseline = %+v", captured.BySource["source-a"])
+	}
+	if m := captured.ModelSummary["model-a"]; m.TotalRequests != 1 || m.TotalTokens != 10 {
+		t.Fatalf("captured model baseline = %+v", m)
+	}
+}
+
+// TestPruneThenRestartKeepsAllTimeTotals simulates retention prune + process
+// restart: capture pruned-only baseline, apply on a fresh stats, re-record
+// remaining details. Old CaptureUsageBaseline-all-time would double-count.
+func TestPruneThenRestartKeepsAllTimeTotals(t *testing.T) {
+	prevEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(true)
+	defer SetStatisticsEnabled(prevEnabled)
+
+	stats := NewRequestStatistics()
+	now := time.Now()
+	oldRec := coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-48 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 10},
+	}
+	recentRec := coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-1 * time.Hour),
+		Failed:      true,
+		Detail:      coreusage.Detail{TotalTokens: 3},
+	}
+	stats.Record(context.Background(), oldRec)
+	stats.Record(context.Background(), recentRec)
+
+	before := stats.KeyStats()
+	if before.TotalRequests != 2 || before.SuccessCount != 1 || before.FailureCount != 1 || before.TotalTokens != 13 {
+		t.Fatalf("pre-prune all-time = %+v", before)
+	}
+
+	if pruned := stats.PruneDetailsOlderThan(now.Add(-24 * time.Hour)); pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+
+	// Runtime all-time must not dip after prune.
+	afterPrune := stats.KeyStats()
+	if afterPrune.TotalRequests != before.TotalRequests || afterPrune.TotalTokens != before.TotalTokens {
+		t.Fatalf("all-time dipped after prune: %+v vs %+v", afterPrune, before)
+	}
+
+	baseline := stats.CaptureUsageBaseline()
+	if baseline.TotalRequests != 1 || baseline.SuccessCount != 1 || baseline.FailureCount != 0 || baseline.TotalTokens != 10 {
+		t.Fatalf("persisted baseline must be pruned-only, got req=%d success=%d failure=%d tokens=%d",
+			baseline.TotalRequests, baseline.SuccessCount, baseline.FailureCount, baseline.TotalTokens)
+	}
+	if baseline.ByAuthIndex["auth-1"].Success != 1 || baseline.ByAuthIndex["auth-1"].Failure != 0 || baseline.ByAuthIndex["auth-1"].Tokens != 10 {
+		t.Fatalf("baseline by_auth_index = %+v", baseline.ByAuthIndex["auth-1"])
+	}
+	if baseline.BySource["source-a"].Success != 1 || baseline.BySource["source-a"].Tokens != 10 {
+		t.Fatalf("baseline by_source = %+v", baseline.BySource["source-a"])
+	}
+	if m := baseline.ModelSummary["model-a"]; m.TotalRequests != 1 || m.SuccessCount != 1 || m.TotalTokens != 10 {
+		t.Fatalf("baseline model_summary = %+v", m)
+	}
+
+	// Simulate restart: new empty stats, apply baseline, re-load remaining detail.
+	restarted := NewRequestStatistics()
+	restarted.ApplyUsageBaseline(baseline)
+	restarted.Record(context.Background(), recentRec)
+
+	afterRestart := restarted.KeyStats()
+	if afterRestart.TotalRequests != 2 || afterRestart.SuccessCount != 1 || afterRestart.FailureCount != 1 || afterRestart.TotalTokens != 13 {
+		t.Fatalf("post-restart all-time = req=%d success=%d failure=%d tokens=%d, want 2/1/1/13",
+			afterRestart.TotalRequests, afterRestart.SuccessCount, afterRestart.FailureCount, afterRestart.TotalTokens)
+	}
+	if afterRestart.ByAuthIndex["auth-1"].Success != 1 || afterRestart.ByAuthIndex["auth-1"].Failure != 1 || afterRestart.ByAuthIndex["auth-1"].Tokens != 13 {
+		t.Fatalf("post-restart auth-1 = %+v", afterRestart.ByAuthIndex["auth-1"])
+	}
+	if afterRestart.BySource["source-a"].Success != 1 || afterRestart.BySource["source-a"].Failure != 1 || afterRestart.BySource["source-a"].Tokens != 13 {
+		t.Fatalf("post-restart source-a = %+v", afterRestart.BySource["source-a"])
+	}
+
+	summary := restarted.Summary()
+	if summary.TotalRequests != 2 || summary.TotalTokens != 13 {
+		t.Fatalf("post-restart summary totals = req=%d tokens=%d", summary.TotalRequests, summary.TotalTokens)
+	}
+	foundModel := false
+	for _, m := range summary.Models {
+		if m.Model == "model-a" {
+			foundModel = true
+			if m.TotalRequests != 2 || m.SuccessCount != 1 || m.FailureCount != 1 || m.TotalTokens != 13 {
+				t.Fatalf("post-restart model summary = %+v", m)
+			}
+		}
+	}
+	if !foundModel {
+		t.Fatal("model-a missing from post-restart summary")
+	}
+
+	// Ranged stats still only see remaining details.
+	ranged := restarted.KeyStatsWithOptions(SnapshotOptions{Since: now.Add(-2 * time.Hour), Until: now})
+	if ranged.TotalRequests != 1 || ranged.FailureCount != 1 || ranged.TotalTokens != 3 {
+		t.Fatalf("post-restart ranged = req=%d failure=%d tokens=%d", ranged.TotalRequests, ranged.FailureCount, ranged.TotalTokens)
+	}
 }
 
 func TestUsageOutcomeDetailsSurviveSnapshotAndImport(t *testing.T) {
