@@ -106,6 +106,86 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	})
 }
 
+func (h *Handler) GetUsageRecentSamples(c *gin.Context) {
+	rangeValue := usageRangeLabel(c)
+	empty := gin.H{
+		"range":          rangeValue,
+		"bucket_minutes": usage.StatusBarBucketMinutes,
+		"block_count":    usage.StatusBarBlockCount,
+		"window_start":   time.Time{},
+		"window_end":     time.Time{},
+		"by_auth_index":  map[string][]usage.SampleBucket{},
+		"by_source":      map[string][]usage.SampleBucket{},
+	}
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+	options, errOptions := parseUsageSnapshotOptions(c)
+	if errOptions != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errOptions.Error()})
+		return
+	}
+	snapshot := h.usageStats.RecentSamplesWithOptions(options)
+	c.JSON(http.StatusOK, gin.H{
+		"range":          rangeValue,
+		"bucket_minutes": snapshot.BucketMinutes,
+		"block_count":    snapshot.BlockCount,
+		"window_start":   snapshot.WindowStart,
+		"window_end":     snapshot.WindowEnd,
+		"by_auth_index":  snapshot.ByAuthIndex,
+		"by_source":      snapshot.BySource,
+	})
+}
+
+func (h *Handler) GetUsageChartData(c *gin.Context) {
+	rangeValue := usageRangeLabel(c)
+	bucketMinutes := 60
+	if raw := strings.TrimSpace(c.Query("bucket_minutes")); raw != "" {
+		if parsed, err := time.ParseDuration(raw + "m"); err == nil && parsed > 0 {
+			bucketMinutes = int(parsed / time.Minute)
+		} else if n, errAtoi := atoiSafe(raw); errAtoi == nil && n > 0 {
+			bucketMinutes = n
+		}
+	}
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"range":          rangeValue,
+			"bucket_minutes": bucketMinutes,
+			"window_start":   time.Time{},
+			"window_end":     time.Time{},
+			"points":         []usage.ChartPoint{},
+			"by_model":       map[string][]usage.ChartPoint{},
+		})
+		return
+	}
+	options, errOptions := parseUsageSnapshotOptions(c)
+	if errOptions != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errOptions.Error()})
+		return
+	}
+	snapshot := h.usageStats.ChartDataWithOptions(options, bucketMinutes, 10)
+	c.JSON(http.StatusOK, gin.H{
+		"range":          rangeValue,
+		"bucket_minutes": snapshot.BucketMinutes,
+		"window_start":   snapshot.WindowStart,
+		"window_end":     snapshot.WindowEnd,
+		"points":         snapshot.Points,
+		"by_model":       snapshot.ByModel,
+	})
+}
+
+func atoiSafe(raw string) (int, error) {
+	n := 0
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0, fmt.Errorf("invalid int")
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n, nil
+}
+
 func usageRangeLabel(c *gin.Context) string {
 	if c == nil {
 		return "all"

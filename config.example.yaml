@@ -70,6 +70,11 @@ usage-statistics-enabled: true
 # Docker users with the provided docker-compose.yml should set this to "/cpa-plus/data/usage.db".
 usage-db-path: "./data/usage.db"
 
+# How many days of per-request usage details to retain in SQLite / memory.
+# 0 disables pruning (default). When set (e.g. 30), older details are deleted
+# periodically; all-time totals remain via a persisted baseline.
+usage-retention-days: 0
+
 # How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60

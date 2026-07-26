@@ -220,3 +220,145 @@ func TestGetUsageSummaryReturnsModelRollups(t *testing.T) {
 		t.Fatalf("summary response unexpectedly includes details")
 	}
 }
+
+func TestGetUsageRecentSamplesBucketsStatusBarWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(prevEnabled)
+
+	stats := internalusage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-5 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 3},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		Failed:      true,
+		RequestedAt: now.Add(-15 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 1},
+	})
+	// Outside the 200-minute status-bar window.
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Source:      "source-a",
+		AuthIndex:   "auth-1",
+		RequestedAt: now.Add(-6 * time.Hour),
+		Detail:      coreusage.Detail{TotalTokens: 9},
+	})
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-statistics/recent-samples?range=24h", nil)
+
+	h := &Handler{usageStats: stats}
+	h.GetUsageRecentSamples(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Range         string                                  `json:"range"`
+		BucketMinutes int                                     `json:"bucket_minutes"`
+		BlockCount    int                                     `json:"block_count"`
+		ByAuthIndex   map[string][]internalusage.SampleBucket `json:"by_auth_index"`
+		BySource      map[string][]internalusage.SampleBucket `json:"by_source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Range != "24h" {
+		t.Fatalf("range = %q, want 24h", payload.Range)
+	}
+	if payload.BucketMinutes != internalusage.StatusBarBucketMinutes || payload.BlockCount != internalusage.StatusBarBlockCount {
+		t.Fatalf("bucket shape = %d/%d", payload.BucketMinutes, payload.BlockCount)
+	}
+	series := payload.ByAuthIndex["auth-1"]
+	if len(series) != internalusage.StatusBarBlockCount {
+		t.Fatalf("auth-1 buckets = %d, want %d", len(series), internalusage.StatusBarBlockCount)
+	}
+	var success, failure int64
+	for _, bucket := range series {
+		success += bucket.Success
+		failure += bucket.Failure
+	}
+	if success != 1 || failure != 1 {
+		t.Fatalf("auth-1 totals success=%d failure=%d, want 1/1", success, failure)
+	}
+	sourceSeries := payload.BySource["source-a"]
+	if len(sourceSeries) != internalusage.StatusBarBlockCount {
+		t.Fatalf("source-a buckets = %d", len(sourceSeries))
+	}
+	if strings.Contains(rec.Body.String(), `"details"`) {
+		t.Fatalf("recent-samples response unexpectedly includes details")
+	}
+}
+
+func TestGetUsageChartDataBucketsRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(prevEnabled)
+
+	stats := internalusage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		RequestedAt: now.Add(-30 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 5},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "model-a",
+		Failed:      true,
+		RequestedAt: now.Add(-10 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 2},
+	})
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-statistics/chart-data?range=24h&bucket_minutes=60", nil)
+	h := &Handler{usageStats: stats}
+	h.GetUsageChartData(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		BucketMinutes int                        `json:"bucket_minutes"`
+		Points        []internalusage.ChartPoint `json:"points"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.BucketMinutes != 60 {
+		t.Fatalf("bucket_minutes = %d", payload.BucketMinutes)
+	}
+	if len(payload.Points) == 0 {
+		t.Fatal("expected chart points")
+	}
+	var req, fail, tokens int64
+	for _, p := range payload.Points {
+		req += p.Requests
+		fail += p.Failure
+		tokens += p.Tokens
+	}
+	if req != 2 || fail != 1 || tokens != 7 {
+		t.Fatalf("totals req=%d fail=%d tokens=%d", req, fail, tokens)
+	}
+	if strings.Contains(rec.Body.String(), `"details"`) {
+		t.Fatal("chart-data unexpectedly includes details")
+	}
+}

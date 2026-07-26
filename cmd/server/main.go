@@ -607,6 +607,9 @@ func main() {
 						sqliteStore.BackfillCosts()
 						_ = pricing.StartSyncLoop(pricingStore, 72*time.Hour)
 					}
+					if cfg.UsageRetentionDays > 0 {
+						usage.StartRetentionLoop(usage.GetRequestStatistics(), cfg.UsageRetentionDays)
+					}
 					defer func() {
 						_ = sqliteStore.Close()
 					}()

@@ -50,7 +50,21 @@ type RequestStatistics struct {
 	failureCount  int64
 	totalTokens   int64
 
+	// Baseline cumulative totals from pruned history (persisted separately).
+	// All-time counters = baseline + remaining in-window details.
+	baselineTotalRequests int64
+	baselineSuccessCount  int64
+	baselineFailureCount  int64
+	baselineTotalTokens   int64
+
 	apis map[string]*apiStats
+
+	// All-time identity counters maintained on write for O(keys) key-stats reads.
+	// Includes baseline + remaining details.
+	keyStatsByAuthIndex map[string]KeyStatBucket
+	keyStatsBySource    map[string]KeyStatBucket
+	// All-time per-model rollups for O(models) summary reads.
+	modelSummary map[string]*SummaryModelStat
 
 	requestsByDay  map[string]int64
 	requestsByHour map[int]int64
@@ -161,6 +175,51 @@ type SummarySnapshot struct {
 	Models        []SummaryModelStat `json:"models,omitempty"`
 }
 
+// Status-bar sample window matches the management UI strip:
+// 20 blocks × 10 minutes = 200 minutes.
+const (
+	StatusBarBlockCount    = 20
+	StatusBarBucketMinutes = 10
+)
+
+// SampleBucket is one fixed-width success/failure cell for status bars.
+type SampleBucket struct {
+	Start   time.Time `json:"start"`
+	End     time.Time `json:"end"`
+	Success int64     `json:"success"`
+	Failure int64     `json:"failure"`
+}
+
+// RecentSamplesSnapshot is a compact per-identity bucket series without details.
+type RecentSamplesSnapshot struct {
+	BucketMinutes int                       `json:"bucket_minutes"`
+	BlockCount    int                       `json:"block_count"`
+	WindowStart   time.Time                 `json:"window_start"`
+	WindowEnd     time.Time                 `json:"window_end"`
+	ByAuthIndex   map[string][]SampleBucket `json:"by_auth_index"`
+	BySource      map[string][]SampleBucket `json:"by_source"`
+}
+
+// ChartPoint is one time-bucket for Usage charts.
+type ChartPoint struct {
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	Label    string    `json:"label"`
+	Requests int64     `json:"requests"`
+	Success  int64     `json:"success"`
+	Failure  int64     `json:"failure"`
+	Tokens   int64     `json:"tokens"`
+}
+
+// ChartDataSnapshot is a compact time-series payload without request details.
+type ChartDataSnapshot struct {
+	BucketMinutes int                     `json:"bucket_minutes"`
+	WindowStart   time.Time               `json:"window_start"`
+	WindowEnd     time.Time               `json:"window_end"`
+	Points        []ChartPoint            `json:"points"`
+	ByModel       map[string][]ChartPoint `json:"by_model,omitempty"`
+}
+
 func (o SnapshotOptions) HasRange() bool {
 	return !o.Since.IsZero() || !o.Until.IsZero()
 }
@@ -193,11 +252,14 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:                make(map[string]*apiStats),
+		keyStatsByAuthIndex: make(map[string]KeyStatBucket),
+		keyStatsBySource:    make(map[string]KeyStatBucket),
+		modelSummary:        make(map[string]*SummaryModelStat),
+		requestsByDay:       make(map[string]int64),
+		requestsByHour:      make(map[int]int64),
+		tokensByDay:         make(map[string]int64),
+		tokensByHour:        make(map[int]int64),
 	}
 }
 
@@ -275,6 +337,271 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	s.bumpAllTimeCounters(model, detail)
+}
+
+// bumpAllTimeCounters updates write-time identity/model aggregates.
+// Caller must hold s.mu for write.
+func (s *RequestStatistics) bumpAllTimeCounters(model string, detail RequestDetail) {
+	if s == nil {
+		return
+	}
+	tokens := detail.Tokens.TotalTokens
+	if tokens < 0 {
+		tokens = 0
+	}
+	if s.keyStatsByAuthIndex == nil {
+		s.keyStatsByAuthIndex = make(map[string]KeyStatBucket)
+	}
+	if s.keyStatsBySource == nil {
+		s.keyStatsBySource = make(map[string]KeyStatBucket)
+	}
+	if s.modelSummary == nil {
+		s.modelSummary = make(map[string]*SummaryModelStat)
+	}
+
+	if authIndex := strings.TrimSpace(detail.AuthIndex); authIndex != "" {
+		bucket := s.keyStatsByAuthIndex[authIndex]
+		if detail.Failed {
+			bucket.Failure++
+		} else {
+			bucket.Success++
+		}
+		bucket.Tokens += tokens
+		s.keyStatsByAuthIndex[authIndex] = bucket
+	}
+	if source := strings.TrimSpace(detail.Source); source != "" {
+		bucket := s.keyStatsBySource[source]
+		if detail.Failed {
+			bucket.Failure++
+		} else {
+			bucket.Success++
+		}
+		bucket.Tokens += tokens
+		s.keyStatsBySource[source] = bucket
+	}
+
+	modelName := strings.TrimSpace(model)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	entry := s.modelSummary[modelName]
+	if entry == nil {
+		entry = &SummaryModelStat{Model: modelName}
+		s.modelSummary[modelName] = entry
+	}
+	entry.TotalRequests++
+	entry.TotalTokens += tokens
+	if detail.Failed {
+		entry.FailureCount++
+	} else {
+		entry.SuccessCount++
+	}
+}
+
+func cloneKeyStatBuckets(src map[string]KeyStatBucket) map[string]KeyStatBucket {
+	if len(src) == 0 {
+		return make(map[string]KeyStatBucket)
+	}
+	out := make(map[string]KeyStatBucket, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// ApplyUsageBaseline seeds all-time counters from a persisted baseline.
+// Call before loading remaining detail rows from SQLite. Caller should not hold s.mu.
+func (s *RequestStatistics) ApplyUsageBaseline(baseline UsageBaseline) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.baselineTotalRequests = baseline.TotalRequests
+	s.baselineSuccessCount = baseline.SuccessCount
+	s.baselineFailureCount = baseline.FailureCount
+	s.baselineTotalTokens = baseline.TotalTokens
+
+	s.totalRequests = baseline.TotalRequests
+	s.successCount = baseline.SuccessCount
+	s.failureCount = baseline.FailureCount
+	s.totalTokens = baseline.TotalTokens
+
+	if s.keyStatsByAuthIndex == nil {
+		s.keyStatsByAuthIndex = make(map[string]KeyStatBucket)
+	}
+	if s.keyStatsBySource == nil {
+		s.keyStatsBySource = make(map[string]KeyStatBucket)
+	}
+	if s.modelSummary == nil {
+		s.modelSummary = make(map[string]*SummaryModelStat)
+	}
+	for k, v := range baseline.ByAuthIndex {
+		s.keyStatsByAuthIndex[k] = v
+	}
+	for k, v := range baseline.BySource {
+		s.keyStatsBySource[k] = v
+	}
+	for k, v := range baseline.ModelSummary {
+		copyEntry := v
+		if strings.TrimSpace(copyEntry.Model) == "" {
+			copyEntry.Model = k
+		}
+		s.modelSummary[k] = &copyEntry
+	}
+}
+
+// CaptureUsageBaseline returns the current all-time counters as a baseline snapshot.
+func (s *RequestStatistics) CaptureUsageBaseline() UsageBaseline {
+	if s == nil {
+		return UsageBaseline{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	models := make(map[string]SummaryModelStat, len(s.modelSummary))
+	for k, v := range s.modelSummary {
+		if v == nil {
+			continue
+		}
+		models[k] = *v
+	}
+	return UsageBaseline{
+		TotalRequests: s.totalRequests,
+		SuccessCount:  s.successCount,
+		FailureCount:  s.failureCount,
+		TotalTokens:   s.totalTokens,
+		ByAuthIndex:   cloneKeyStatBuckets(s.keyStatsByAuthIndex),
+		BySource:      cloneKeyStatBuckets(s.keyStatsBySource),
+		ModelSummary:  models,
+		UpdatedAt:     time.Now().UTC(),
+	}
+}
+
+// PruneDetailsOlderThan removes in-memory request details older than cutoff.
+// All-time counters are preserved (history remains in baseline + counters).
+// Returns the number of pruned detail rows.
+func (s *RequestStatistics) PruneDetailsOlderThan(cutoff time.Time) int {
+	if s == nil || cutoff.IsZero() {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pruned := 0
+	var dropRequests, dropSuccess, dropFailure, dropTokens int64
+	dropByAuth := make(map[string]KeyStatBucket)
+	dropBySource := make(map[string]KeyStatBucket)
+	dropModels := make(map[string]*SummaryModelStat)
+
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil || len(modelStatsValue.Details) == 0 {
+				continue
+			}
+			kept := modelStatsValue.Details[:0]
+			var keptRequests, keptTokens int64
+			for _, detail := range modelStatsValue.Details {
+				if !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
+					pruned++
+					tokens := detail.Tokens.TotalTokens
+					if tokens < 0 {
+						tokens = 0
+					}
+					dropRequests++
+					dropTokens += tokens
+					if detail.Failed {
+						dropFailure++
+					} else {
+						dropSuccess++
+					}
+					if authIndex := strings.TrimSpace(detail.AuthIndex); authIndex != "" {
+						b := dropByAuth[authIndex]
+						if detail.Failed {
+							b.Failure++
+						} else {
+							b.Success++
+						}
+						b.Tokens += tokens
+						dropByAuth[authIndex] = b
+					}
+					if source := strings.TrimSpace(detail.Source); source != "" {
+						b := dropBySource[source]
+						if detail.Failed {
+							b.Failure++
+						} else {
+							b.Success++
+						}
+						b.Tokens += tokens
+						dropBySource[source] = b
+					}
+					name := strings.TrimSpace(modelName)
+					if name == "" {
+						name = "unknown"
+					}
+					entry := dropModels[name]
+					if entry == nil {
+						entry = &SummaryModelStat{Model: name}
+						dropModels[name] = entry
+					}
+					entry.TotalRequests++
+					entry.TotalTokens += tokens
+					if detail.Failed {
+						entry.FailureCount++
+					} else {
+						entry.SuccessCount++
+					}
+					continue
+				}
+				kept = append(kept, detail)
+				keptRequests++
+				tokens := detail.Tokens.TotalTokens
+				if tokens < 0 {
+					tokens = 0
+				}
+				keptTokens += tokens
+			}
+			modelStatsValue.Details = kept
+			modelStatsValue.TotalRequests = keptRequests
+			modelStatsValue.TotalTokens = keptTokens
+		}
+	}
+
+	// Move dropped history into baseline so boot after prune can restore all-time totals.
+	s.baselineTotalRequests += dropRequests
+	s.baselineSuccessCount += dropSuccess
+	s.baselineFailureCount += dropFailure
+	s.baselineTotalTokens += dropTokens
+	return pruned
+}
+
+// PruneOlderThan prunes SQLite + in-memory details older than retentionDays.
+// retentionDays <= 0 is a no-op. All-time counters remain available via baseline.
+func (s *RequestStatistics) PruneOlderThan(retentionDays int) (deletedDB int64, prunedMemory int, err error) {
+	if s == nil || retentionDays <= 0 {
+		return 0, 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	prunedMemory = s.PruneDetailsOlderThan(cutoff)
+
+	// Persist baseline from current all-time counters (includes pruned history),
+	// then delete old SQLite detail rows.
+	if s.sqliteStore != nil {
+		baseline := s.CaptureUsageBaseline()
+		if errSave := s.sqliteStore.SaveUsageBaseline(baseline); errSave != nil {
+			return 0, prunedMemory, errSave
+		}
+		deletedDB, err = s.sqliteStore.DeleteOlderThan(cutoff)
+		if err != nil {
+			return deletedDB, prunedMemory, err
+		}
+	}
+	return deletedDB, prunedMemory, nil
 }
 
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
@@ -300,6 +627,17 @@ func (s *RequestStatistics) KeyStatsWithOptions(options SnapshotOptions) KeyStat
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// All-time path uses write-time counters (O(keys)), not a full details scan.
+	if !options.HasRange() {
+		result.TotalRequests = s.totalRequests
+		result.SuccessCount = s.successCount
+		result.FailureCount = s.failureCount
+		result.TotalTokens = s.totalTokens
+		result.ByAuthIndex = cloneKeyStatBuckets(s.keyStatsByAuthIndex)
+		result.BySource = cloneKeyStatBuckets(s.keyStatsBySource)
+		return result
+	}
 
 	for _, stats := range s.apis {
 		if stats == nil {
@@ -351,6 +689,312 @@ func (s *RequestStatistics) KeyStatsWithOptions(options SnapshotOptions) KeyStat
 	return result
 }
 
+func (s *RequestStatistics) RecentSamples() RecentSamplesSnapshot {
+	return s.RecentSamplesWithOptions(SnapshotOptions{})
+}
+
+// RecentSamplesWithOptions builds fixed status-bar buckets.
+// The sample window is always the trailing status-bar window (200 minutes)
+// ending at options.Until (or now). options.Since only further clips the window.
+func (s *RequestStatistics) RecentSamplesWithOptions(options SnapshotOptions) RecentSamplesSnapshot {
+	now := time.Now()
+	windowEnd := now
+	if !options.Until.IsZero() {
+		windowEnd = options.Until
+	}
+	bucketDuration := time.Duration(StatusBarBucketMinutes) * time.Minute
+	windowStart := windowEnd.Add(-time.Duration(StatusBarBlockCount) * bucketDuration)
+	if !options.Since.IsZero() && options.Since.After(windowStart) {
+		windowStart = options.Since
+	}
+
+	result := RecentSamplesSnapshot{
+		BucketMinutes: StatusBarBucketMinutes,
+		BlockCount:    StatusBarBlockCount,
+		WindowStart:   windowStart,
+		WindowEnd:     windowEnd,
+		ByAuthIndex:   make(map[string][]SampleBucket),
+		BySource:      make(map[string][]SampleBucket),
+	}
+	if s == nil {
+		return result
+	}
+
+	type acc struct {
+		success []int64
+		failure []int64
+	}
+	byAuth := make(map[string]*acc)
+	bySource := make(map[string]*acc)
+	ensure := func(m map[string]*acc, key string) *acc {
+		entry := m[key]
+		if entry == nil {
+			entry = &acc{
+				success: make([]int64, StatusBarBlockCount),
+				failure: make([]int64, StatusBarBlockCount),
+			}
+			m[key] = entry
+		}
+		return entry
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	windowMs := windowEnd.Sub(windowStart)
+	if windowMs <= 0 {
+		return result
+	}
+
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details {
+				ts := detail.Timestamp
+				if ts.IsZero() || ts.Before(windowStart) || ts.After(windowEnd) {
+					continue
+				}
+				age := windowEnd.Sub(ts)
+				blockIndex := StatusBarBlockCount - 1 - int(age/bucketDuration)
+				if blockIndex < 0 || blockIndex >= StatusBarBlockCount {
+					continue
+				}
+				if authIndex := strings.TrimSpace(detail.AuthIndex); authIndex != "" {
+					entry := ensure(byAuth, authIndex)
+					if detail.Failed {
+						entry.failure[blockIndex]++
+					} else {
+						entry.success[blockIndex]++
+					}
+				}
+				if source := strings.TrimSpace(detail.Source); source != "" {
+					entry := ensure(bySource, source)
+					if detail.Failed {
+						entry.failure[blockIndex]++
+					} else {
+						entry.success[blockIndex]++
+					}
+				}
+			}
+		}
+	}
+
+	buildSeries := func(m map[string]*acc) map[string][]SampleBucket {
+		out := make(map[string][]SampleBucket, len(m))
+		for key, entry := range m {
+			series := make([]SampleBucket, StatusBarBlockCount)
+			for i := 0; i < StatusBarBlockCount; i++ {
+				start := windowStart.Add(time.Duration(i) * bucketDuration)
+				series[i] = SampleBucket{
+					Start:   start,
+					End:     start.Add(bucketDuration),
+					Success: entry.success[i],
+					Failure: entry.failure[i],
+				}
+			}
+			out[key] = series
+		}
+		return out
+	}
+	result.ByAuthIndex = buildSeries(byAuth)
+	result.BySource = buildSeries(bySource)
+	return result
+}
+
+// ChartDataWithOptions builds fixed-width chart buckets over options range
+// (or last 24h when no range is provided). bucketMinutes defaults to 60.
+// modelLimit caps per-model series (0 disables by_model).
+func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucketMinutes, modelLimit int) ChartDataSnapshot {
+	if bucketMinutes <= 0 {
+		bucketMinutes = 60
+	}
+	if modelLimit < 0 {
+		modelLimit = 0
+	}
+	now := time.Now()
+	windowEnd := now
+	if !options.Until.IsZero() {
+		windowEnd = options.Until
+	}
+	windowStart := windowEnd.Add(-24 * time.Hour)
+	if !options.Since.IsZero() {
+		windowStart = options.Since
+	}
+	if !windowEnd.After(windowStart) {
+		windowEnd = windowStart.Add(time.Duration(bucketMinutes) * time.Minute)
+	}
+
+	bucketDuration := time.Duration(bucketMinutes) * time.Minute
+	// Align start down to bucket boundary for stable labels.
+	windowStart = windowStart.UTC().Truncate(bucketDuration)
+	windowEnd = windowEnd.UTC()
+	if !windowEnd.After(windowStart) {
+		windowEnd = windowStart.Add(bucketDuration)
+	}
+	blockCount := int(windowEnd.Sub(windowStart) / bucketDuration)
+	if windowEnd.After(windowStart.Add(time.Duration(blockCount) * bucketDuration)) {
+		blockCount++
+	}
+	if blockCount < 1 {
+		blockCount = 1
+	}
+	// Hard cap to keep payloads small (e.g. 7d @ 5m = 2016; allow up to ~3000).
+	const maxBlocks = 3000
+	if blockCount > maxBlocks {
+		blockCount = maxBlocks
+		windowStart = windowEnd.Add(-time.Duration(blockCount) * bucketDuration)
+	}
+
+	result := ChartDataSnapshot{
+		BucketMinutes: bucketMinutes,
+		WindowStart:   windowStart,
+		WindowEnd:     windowEnd,
+		Points:        make([]ChartPoint, blockCount),
+		ByModel:       make(map[string][]ChartPoint),
+	}
+	for i := 0; i < blockCount; i++ {
+		start := windowStart.Add(time.Duration(i) * bucketDuration)
+		end := start.Add(bucketDuration)
+		label := start.Format("01-02 15:04")
+		if bucketMinutes >= 24*60 {
+			label = start.Format("2006-01-02")
+		}
+		result.Points[i] = ChartPoint{Start: start, End: end, Label: label}
+	}
+	if s == nil {
+		return result
+	}
+
+	type acc struct {
+		requests, success, failure, tokens []int64
+	}
+	total := &acc{
+		requests: make([]int64, blockCount),
+		success:  make([]int64, blockCount),
+		failure:  make([]int64, blockCount),
+		tokens:   make([]int64, blockCount),
+	}
+	byModel := make(map[string]*acc)
+	ensureModel := func(name string) *acc {
+		entry := byModel[name]
+		if entry == nil {
+			entry = &acc{
+				requests: make([]int64, blockCount),
+				success:  make([]int64, blockCount),
+				failure:  make([]int64, blockCount),
+				tokens:   make([]int64, blockCount),
+			}
+			byModel[name] = entry
+		}
+		return entry
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			name := strings.TrimSpace(modelName)
+			if name == "" {
+				name = "unknown"
+			}
+			for _, detail := range modelStatsValue.Details {
+				ts := detail.Timestamp
+				if ts.IsZero() || ts.Before(windowStart) || !ts.Before(windowEnd) {
+					continue
+				}
+				idx := int(ts.Sub(windowStart) / bucketDuration)
+				if idx < 0 || idx >= blockCount {
+					continue
+				}
+				tokens := detail.Tokens.TotalTokens
+				if tokens < 0 {
+					tokens = 0
+				}
+				total.requests[idx]++
+				total.tokens[idx] += tokens
+				if detail.Failed {
+					total.failure[idx]++
+				} else {
+					total.success[idx]++
+				}
+				if modelLimit > 0 {
+					m := ensureModel(name)
+					m.requests[idx]++
+					m.tokens[idx] += tokens
+					if detail.Failed {
+						m.failure[idx]++
+					} else {
+						m.success[idx]++
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < blockCount; i++ {
+		result.Points[i].Requests = total.requests[i]
+		result.Points[i].Success = total.success[i]
+		result.Points[i].Failure = total.failure[i]
+		result.Points[i].Tokens = total.tokens[i]
+	}
+
+	if modelLimit > 0 && len(byModel) > 0 {
+		// Keep top models by total requests.
+		type rank struct {
+			name string
+			req  int64
+		}
+		ranks := make([]rank, 0, len(byModel))
+		for name, entry := range byModel {
+			var sum int64
+			for _, v := range entry.requests {
+				sum += v
+			}
+			ranks = append(ranks, rank{name: name, req: sum})
+		}
+		sort.Slice(ranks, func(i, j int) bool {
+			if ranks[i].req == ranks[j].req {
+				return ranks[i].name < ranks[j].name
+			}
+			return ranks[i].req > ranks[j].req
+		})
+		if len(ranks) > modelLimit {
+			ranks = ranks[:modelLimit]
+		}
+		for _, r := range ranks {
+			entry := byModel[r.name]
+			series := make([]ChartPoint, blockCount)
+			for i := 0; i < blockCount; i++ {
+				series[i] = ChartPoint{
+					Start:    result.Points[i].Start,
+					End:      result.Points[i].End,
+					Label:    result.Points[i].Label,
+					Requests: entry.requests[i],
+					Success:  entry.success[i],
+					Failure:  entry.failure[i],
+					Tokens:   entry.tokens[i],
+				}
+			}
+			result.ByModel[r.name] = series
+		}
+	} else {
+		result.ByModel = nil
+	}
+	return result
+}
+
 func (s *RequestStatistics) Summary() SummarySnapshot {
 	return s.SummaryWithOptions(SnapshotOptions{}, 20)
 }
@@ -368,41 +1012,60 @@ func (s *RequestStatistics) SummaryWithOptions(options SnapshotOptions, modelLim
 	defer s.mu.RUnlock()
 
 	modelTotals := make(map[string]*SummaryModelStat)
-	for _, stats := range s.apis {
-		if stats == nil {
-			continue
-		}
-		for modelName, modelStatsValue := range stats.Models {
-			if modelStatsValue == nil {
+
+	if !options.HasRange() {
+		// All-time path uses write-time model counters.
+		result.TotalRequests = s.totalRequests
+		result.SuccessCount = s.successCount
+		result.FailureCount = s.failureCount
+		result.TotalTokens = s.totalTokens
+		for name, entry := range s.modelSummary {
+			if entry == nil {
 				continue
 			}
-			name := strings.TrimSpace(modelName)
-			if name == "" {
-				name = "unknown"
+			copyEntry := *entry
+			if strings.TrimSpace(copyEntry.Model) == "" {
+				copyEntry.Model = name
 			}
-			for _, detail := range modelStatsValue.Details {
-				if !options.includes(detail.Timestamp) {
+			modelTotals[copyEntry.Model] = &copyEntry
+		}
+	} else {
+		for _, stats := range s.apis {
+			if stats == nil {
+				continue
+			}
+			for modelName, modelStatsValue := range stats.Models {
+				if modelStatsValue == nil {
 					continue
 				}
-				tokens := detail.Tokens.TotalTokens
-				if tokens < 0 {
-					tokens = 0
+				name := strings.TrimSpace(modelName)
+				if name == "" {
+					name = "unknown"
 				}
-				result.TotalRequests++
-				result.TotalTokens += tokens
-				entry := modelTotals[name]
-				if entry == nil {
-					entry = &SummaryModelStat{Model: name}
-					modelTotals[name] = entry
-				}
-				entry.TotalRequests++
-				entry.TotalTokens += tokens
-				if detail.Failed {
-					result.FailureCount++
-					entry.FailureCount++
-				} else {
-					result.SuccessCount++
-					entry.SuccessCount++
+				for _, detail := range modelStatsValue.Details {
+					if !options.includes(detail.Timestamp) {
+						continue
+					}
+					tokens := detail.Tokens.TotalTokens
+					if tokens < 0 {
+						tokens = 0
+					}
+					result.TotalRequests++
+					result.TotalTokens += tokens
+					entry := modelTotals[name]
+					if entry == nil {
+						entry = &SummaryModelStat{Model: name}
+						modelTotals[name] = entry
+					}
+					entry.TotalRequests++
+					entry.TotalTokens += tokens
+					if detail.Failed {
+						result.FailureCount++
+						entry.FailureCount++
+					} else {
+						result.SuccessCount++
+						entry.SuccessCount++
+					}
 				}
 			}
 		}

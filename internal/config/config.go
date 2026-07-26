@@ -76,6 +76,11 @@ type Config struct {
 	// When empty, defaults to usage.db alongside the config file.
 	UsageDBPath string `yaml:"usage-db-path" json:"usage-db-path"`
 
+	// UsageRetentionDays controls how long detailed usage records are retained in
+	// SQLite and in-memory detail slices. 0 disables pruning (default).
+	// All-time totals survive pruning via a persisted baseline.
+	UsageRetentionDays int `yaml:"usage-retention-days" json:"usage-retention-days"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,17 @@ CREATE TABLE IF NOT EXISTS custom_model_prices (
 	completion_price REAL NOT NULL DEFAULT 0,
 	cache_price      REAL NOT NULL DEFAULT 0,
 	cache_write_price REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS usage_stats_baseline (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	total_requests INTEGER NOT NULL DEFAULT 0,
+	success_count INTEGER NOT NULL DEFAULT 0,
+	failure_count INTEGER NOT NULL DEFAULT 0,
+	total_tokens INTEGER NOT NULL DEFAULT 0,
+	by_auth_index_json TEXT NOT NULL DEFAULT '{}',
+	by_source_json TEXT NOT NULL DEFAULT '{}',
+	model_summary_json TEXT NOT NULL DEFAULT '{}',
+	updated_at TEXT NOT NULL DEFAULT ''
 );
 `
 
@@ -693,6 +705,122 @@ func (s *SQLiteStore) DeleteOlderThan(before time.Time) (int64, error) {
 	}
 	affected, _ := res.RowsAffected()
 	return affected, nil
+}
+
+// UsageBaseline is the cumulative totals preserved across detail retention.
+type UsageBaseline struct {
+	TotalRequests int64                       `json:"total_requests"`
+	SuccessCount  int64                       `json:"success_count"`
+	FailureCount  int64                       `json:"failure_count"`
+	TotalTokens   int64                       `json:"total_tokens"`
+	ByAuthIndex   map[string]KeyStatBucket    `json:"by_auth_index"`
+	BySource      map[string]KeyStatBucket    `json:"by_source"`
+	ModelSummary  map[string]SummaryModelStat `json:"model_summary"`
+	UpdatedAt     time.Time                   `json:"updated_at"`
+}
+
+func (s *SQLiteStore) SaveUsageBaseline(baseline UsageBaseline) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if baseline.ByAuthIndex == nil {
+		baseline.ByAuthIndex = map[string]KeyStatBucket{}
+	}
+	if baseline.BySource == nil {
+		baseline.BySource = map[string]KeyStatBucket{}
+	}
+	if baseline.ModelSummary == nil {
+		baseline.ModelSummary = map[string]SummaryModelStat{}
+	}
+	authJSON, err := json.Marshal(baseline.ByAuthIndex)
+	if err != nil {
+		return fmt.Errorf("usage db: marshal baseline auth index: %w", err)
+	}
+	sourceJSON, err := json.Marshal(baseline.BySource)
+	if err != nil {
+		return fmt.Errorf("usage db: marshal baseline source: %w", err)
+	}
+	modelJSON, err := json.Marshal(baseline.ModelSummary)
+	if err != nil {
+		return fmt.Errorf("usage db: marshal baseline models: %w", err)
+	}
+	updatedAt := baseline.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.db.Exec(`
+		INSERT INTO usage_stats_baseline (
+			id, total_requests, success_count, failure_count, total_tokens,
+			by_auth_index_json, by_source_json, model_summary_json, updated_at
+		) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			total_requests = excluded.total_requests,
+			success_count = excluded.success_count,
+			failure_count = excluded.failure_count,
+			total_tokens = excluded.total_tokens,
+			by_auth_index_json = excluded.by_auth_index_json,
+			by_source_json = excluded.by_source_json,
+			model_summary_json = excluded.model_summary_json,
+			updated_at = excluded.updated_at
+	`, baseline.TotalRequests, baseline.SuccessCount, baseline.FailureCount, baseline.TotalTokens,
+		string(authJSON), string(sourceJSON), string(modelJSON), updatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("usage db: save baseline failed: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) LoadUsageBaseline() (UsageBaseline, error) {
+	out := UsageBaseline{
+		ByAuthIndex:  map[string]KeyStatBucket{},
+		BySource:     map[string]KeyStatBucket{},
+		ModelSummary: map[string]SummaryModelStat{},
+	}
+	if s == nil || s.db == nil {
+		return out, nil
+	}
+	var (
+		authJSON, sourceJSON, modelJSON, updatedAt string
+	)
+	err := s.db.QueryRow(`
+		SELECT total_requests, success_count, failure_count, total_tokens,
+		       by_auth_index_json, by_source_json, model_summary_json, updated_at
+		FROM usage_stats_baseline WHERE id = 1
+	`).Scan(
+		&out.TotalRequests, &out.SuccessCount, &out.FailureCount, &out.TotalTokens,
+		&authJSON, &sourceJSON, &modelJSON, &updatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return out, nil
+	}
+	if err != nil {
+		return out, fmt.Errorf("usage db: load baseline failed: %w", err)
+	}
+	if authJSON != "" {
+		_ = json.Unmarshal([]byte(authJSON), &out.ByAuthIndex)
+	}
+	if sourceJSON != "" {
+		_ = json.Unmarshal([]byte(sourceJSON), &out.BySource)
+	}
+	if modelJSON != "" {
+		_ = json.Unmarshal([]byte(modelJSON), &out.ModelSummary)
+	}
+	if ts, errParse := time.Parse(time.RFC3339Nano, updatedAt); errParse == nil {
+		out.UpdatedAt = ts
+	}
+	if out.ByAuthIndex == nil {
+		out.ByAuthIndex = map[string]KeyStatBucket{}
+	}
+	if out.BySource == nil {
+		out.BySource = map[string]KeyStatBucket{}
+	}
+	if out.ModelSummary == nil {
+		out.ModelSummary = map[string]SummaryModelStat{}
+	}
+	return out, nil
 }
 
 func (s *SQLiteStore) ExportSnapshot() (StatisticsSnapshot, error) {
