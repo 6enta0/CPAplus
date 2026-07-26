@@ -421,3 +421,53 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ReasoningSummaryUsesArrayPath(t *testing.T) {
+	t.Parallel()
+
+	// summary is an array of summary_text parts; done must set item.summary.0.text,
+	// not item.summary.text (which would replace the array with an object).
+	request := []byte(`{"model":"gpt-5.4"}`)
+	in := []string{
+		`data: {"id":"resp_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"think "},"finish_reason":null}]}`,
+		`data: {"id":"resp_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":"hard"},"finish_reason":null}]}`,
+		`data: {"id":"resp_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":"answer","reasoning_content":null},"finish_reason":null}]}`,
+		`data: {"id":"resp_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null},"finish_reason":"stop"}],"usage":{"completion_tokens":3,"total_tokens":5,"prompt_tokens":2}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var reasoningDone gjson.Result
+	var found bool
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.output_item.done" && data.Get("item.type").String() == "reasoning" {
+			reasoningDone = data
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected reasoning response.output_item.done event")
+	}
+
+	summary := reasoningDone.Get("item.summary")
+	if !summary.IsArray() {
+		t.Fatalf("item.summary should remain an array, got %s", summary.Raw)
+	}
+	if got := summary.Get("0.type").String(); got != "summary_text" {
+		t.Fatalf("item.summary.0.type = %q, want summary_text", got)
+	}
+	if got := summary.Get("0.text").String(); got != "think hard" {
+		t.Fatalf("item.summary.0.text = %q, want %q", got, "think hard")
+	}
+	// Wrong path item.summary.text must not create a sibling string field.
+	if reasoningDone.Get("item.summary").Type == gjson.String {
+		t.Fatalf("item.summary was overwritten as string: %s", reasoningDone.Get("item").Raw)
+	}
+}
