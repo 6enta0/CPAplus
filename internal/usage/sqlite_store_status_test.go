@@ -94,6 +94,63 @@ func TestNewSQLiteStoreMigratesOutcomeColumnsWithoutLosingRecords(t *testing.T) 
 	}
 }
 
+// TestDeleteOlderThanUsesNanoPrecisionBoundary ensures retention cutoff strings
+// match InsertRecord's fixed-width layout. Second-only RFC3339 cutoffs made a
+// same-second fractional record after the wall-clock cutoff compare as smaller
+// ('.' < 'Z') and get incorrectly deleted.
+func TestDeleteOlderThanUsesNanoPrecisionBoundary(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("open usage db: %v", err)
+	}
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Errorf("close store: %v", errClose)
+		}
+	}()
+
+	// Exact-second cutoff is the sharp edge: trimmed RFC3339/RFC3339Nano both
+	// emit "...:00Z", which sorts after any "...:00.<frac>Z".
+	cutoff := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	keepAt := cutoff.Add(500 * time.Millisecond)
+	dropAt := cutoff.Add(-500 * time.Millisecond)
+
+	store.InsertRecord(coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "keep-model",
+		RequestedAt: keepAt,
+		Detail:      coreusage.Detail{TotalTokens: 11},
+	})
+	store.InsertRecord(coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "drop-model",
+		RequestedAt: dropAt,
+		Detail:      coreusage.Detail{TotalTokens: 22},
+	})
+
+	deleted, err := store.DeleteOlderThan(cutoff)
+	if err != nil {
+		t.Fatalf("DeleteOlderThan: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+
+	records, err := store.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("remaining = %d, want 1 (%+v)", len(records), records)
+	}
+	if records[0].Model != "keep-model" || records[0].TotalTokens != 11 {
+		t.Fatalf("remaining record = %+v, want keep-model/11", records[0])
+	}
+	if !records[0].Timestamp.Equal(keepAt) {
+		t.Fatalf("timestamp = %v, want %v", records[0].Timestamp, keepAt)
+	}
+}
+
 func TestSQLitePluginResolvesUnknownStatusFromRequestContext(t *testing.T) {
 	prevEnabled := StatisticsEnabled()
 	SetStatisticsEnabled(true)

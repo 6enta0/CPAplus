@@ -22,6 +22,11 @@ import (
 
 const usageSchemaVersion = 5
 
+// usageTimestampLayout is the fixed-width UTC layout for usage_records.timestamp.
+// Digits use '0' (not RFC3339Nano's '9') so trailing fractional zeros are kept and
+// SQLite lexicographic compares match chronological order for same-second values.
+const usageTimestampLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS usage_records (
 	id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,7 +289,7 @@ func (s *SQLiteStore) InsertRecord(record coreusage.Record) {
 		model,
 		record.Source,
 		record.AuthIndex,
-		timestamp.UTC().Format(time.RFC3339Nano),
+		timestamp.UTC().Format(usageTimestampLayout),
 		normaliseLatency(record.Latency),
 		failed,
 		statusCode,
@@ -698,7 +703,9 @@ func (s *SQLiteStore) DeleteOlderThan(before time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := before.UTC().Format(time.RFC3339)
+	// Match InsertRecord's fixed-width layout so lexicographic string compare
+	// stays consistent for same-second fractional timestamps.
+	cutoff := before.UTC().Format(usageTimestampLayout)
 	res, err := s.db.Exec(`DELETE FROM usage_records WHERE timestamp < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("usage db: delete failed: %w", err)
