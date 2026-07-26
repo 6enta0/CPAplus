@@ -148,6 +148,7 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 			bucketMinutes = n
 		}
 	}
+	forceModels := parseChartForceModels(c)
 	if h == nil || h.usageStats == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"range":          rangeValue,
@@ -164,7 +165,7 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errOptions.Error()})
 		return
 	}
-	snapshot := h.usageStats.ChartDataWithOptions(options, bucketMinutes, 10)
+	snapshot := h.usageStats.ChartDataWithOptions(options, bucketMinutes, 10, forceModels)
 	c.JSON(http.StatusOK, gin.H{
 		"range":          rangeValue,
 		"bucket_minutes": snapshot.BucketMinutes,
@@ -173,6 +174,35 @@ func (h *Handler) GetUsageChartData(c *gin.Context) {
 		"points":         snapshot.Points,
 		"by_model":       snapshot.ByModel,
 	})
+}
+
+// parseChartForceModels reads models=a,b,c (max 20) for chart-data force-include.
+func parseChartForceModels(c *gin.Context) []string {
+	if c == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(c.Query("models"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" || name == "all" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+		if len(out) >= 20 {
+			break
+		}
+	}
+	return out
 }
 
 func atoiSafe(raw string) (int, error) {

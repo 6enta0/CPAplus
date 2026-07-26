@@ -876,13 +876,23 @@ func (s *RequestStatistics) RecentSamplesWithOptions(options SnapshotOptions) Re
 
 // ChartDataWithOptions builds fixed-width chart buckets over options range
 // (or last 24h when no range is provided). bucketMinutes defaults to 60.
-// modelLimit caps per-model series (0 disables by_model).
-func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucketMinutes, modelLimit int) ChartDataSnapshot {
+// modelLimit caps per-model series (0 disables by_model). forceModels are
+// always included in by_model (beyond top-N) so selected chart lines never
+// silently disappear.
+func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucketMinutes, modelLimit int, forceModels []string) ChartDataSnapshot {
 	if bucketMinutes <= 0 {
 		bucketMinutes = 60
 	}
 	if modelLimit < 0 {
 		modelLimit = 0
+	}
+	forceSet := make(map[string]struct{})
+	for _, name := range forceModels {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "all" {
+			continue
+		}
+		forceSet[name] = struct{}{}
 	}
 	now := time.Now()
 	windowEnd := now
@@ -997,7 +1007,11 @@ func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucket
 				} else {
 					total.success[idx]++
 				}
-				if modelLimit > 0 {
+				trackModel := modelLimit > 0
+				if !trackModel {
+					_, trackModel = forceSet[name]
+				}
+				if trackModel {
 					m := ensureModel(name)
 					m.requests[idx]++
 					m.tokens[idx] += tokens
@@ -1018,8 +1032,32 @@ func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucket
 		result.Points[i].Tokens = total.tokens[i]
 	}
 
+	emitModelSeries := func(name string, entry *acc) {
+		if entry == nil {
+			entry = &acc{
+				requests: make([]int64, blockCount),
+				success:  make([]int64, blockCount),
+				failure:  make([]int64, blockCount),
+				tokens:   make([]int64, blockCount),
+			}
+		}
+		series := make([]ChartPoint, blockCount)
+		for i := 0; i < blockCount; i++ {
+			series[i] = ChartPoint{
+				Start:    result.Points[i].Start,
+				End:      result.Points[i].End,
+				Label:    result.Points[i].Label,
+				Requests: entry.requests[i],
+				Success:  entry.success[i],
+				Failure:  entry.failure[i],
+				Tokens:   entry.tokens[i],
+			}
+		}
+		result.ByModel[name] = series
+	}
+
 	if modelLimit > 0 && len(byModel) > 0 {
-		// Keep top models by total requests.
+		// Keep top models by total requests, then force-include selected models.
 		type rank struct {
 			name string
 			req  int64
@@ -1042,20 +1080,18 @@ func (s *RequestStatistics) ChartDataWithOptions(options SnapshotOptions, bucket
 			ranks = ranks[:modelLimit]
 		}
 		for _, r := range ranks {
-			entry := byModel[r.name]
-			series := make([]ChartPoint, blockCount)
-			for i := 0; i < blockCount; i++ {
-				series[i] = ChartPoint{
-					Start:    result.Points[i].Start,
-					End:      result.Points[i].End,
-					Label:    result.Points[i].Label,
-					Requests: entry.requests[i],
-					Success:  entry.success[i],
-					Failure:  entry.failure[i],
-					Tokens:   entry.tokens[i],
-				}
+			emitModelSeries(r.name, byModel[r.name])
+		}
+		for name := range forceSet {
+			if _, ok := result.ByModel[name]; ok {
+				continue
 			}
-			result.ByModel[r.name] = series
+			emitModelSeries(name, byModel[name])
+		}
+	} else if len(forceSet) > 0 {
+		// modelLimit disabled, but caller still asked for explicit models.
+		for name := range forceSet {
+			emitModelSeries(name, byModel[name])
 		}
 	} else {
 		result.ByModel = nil

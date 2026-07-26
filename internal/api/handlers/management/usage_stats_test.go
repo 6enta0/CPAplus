@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -360,5 +361,103 @@ func TestGetUsageChartDataBucketsRequests(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"details"`) {
 		t.Fatal("chart-data unexpectedly includes details")
+	}
+}
+
+// TestGetUsageChartDataForceModelsIncludesNonTop ensures models= still returns a
+// series for a low-traffic model outside the default top-10 ranking.
+func TestGetUsageChartDataForceModelsIncludesNonTop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prevEnabled := internalusage.StatisticsEnabled()
+	internalusage.SetStatisticsEnabled(true)
+	defer internalusage.SetStatisticsEnabled(prevEnabled)
+
+	stats := internalusage.NewRequestStatistics()
+	now := time.Now()
+	// 10 popular models with higher request counts.
+	for i := 0; i < 10; i++ {
+		model := fmt.Sprintf("top-%02d", i)
+		for j := 0; j < 3; j++ {
+			stats.Record(context.Background(), coreusage.Record{
+				APIKey:      "api-a",
+				Model:       model,
+				RequestedAt: now.Add(-time.Duration(j+1) * time.Minute),
+				Detail:      coreusage.Detail{TotalTokens: 1},
+			})
+		}
+	}
+	// Long-tail model with only one request — outside top-10 by volume.
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-a",
+		Model:       "tail-model",
+		RequestedAt: now.Add(-15 * time.Minute),
+		Detail:      coreusage.Detail{TotalTokens: 42},
+	})
+
+	// Without models=, tail-model must be absent from by_model.
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-statistics/chart-data?range=24h&bucket_minutes=60", nil)
+	h := &Handler{usageStats: stats}
+	h.GetUsageChartData(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var defaultPayload struct {
+		ByModel map[string][]internalusage.ChartPoint `json:"by_model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &defaultPayload); err != nil {
+		t.Fatalf("unmarshal default: %v", err)
+	}
+	if _, ok := defaultPayload.ByModel["tail-model"]; ok {
+		t.Fatal("tail-model unexpectedly present in default top-10 by_model")
+	}
+	if len(defaultPayload.ByModel) != 10 {
+		t.Fatalf("default by_model size = %d, want 10", len(defaultPayload.ByModel))
+	}
+
+	// With models=tail-model, series must be present with the one request.
+	rec = httptest.NewRecorder()
+	ginCtx, _ = gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/usage-statistics/chart-data?range=24h&bucket_minutes=60&models=tail-model,all,tail-model",
+		nil,
+	)
+	h.GetUsageChartData(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forced status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var forcedPayload struct {
+		ByModel map[string][]internalusage.ChartPoint `json:"by_model"`
+		Points  []internalusage.ChartPoint            `json:"points"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &forcedPayload); err != nil {
+		t.Fatalf("unmarshal forced: %v", err)
+	}
+	series, ok := forcedPayload.ByModel["tail-model"]
+	if !ok {
+		t.Fatal("tail-model missing from forced by_model")
+	}
+	var req, tokens int64
+	for _, p := range series {
+		req += p.Requests
+		tokens += p.Tokens
+	}
+	if req != 1 || tokens != 42 {
+		t.Fatalf("tail-model totals req=%d tokens=%d, want 1/42", req, tokens)
+	}
+	// Top-10 still present; force-include is additive.
+	if len(forcedPayload.ByModel) < 11 {
+		t.Fatalf("forced by_model size = %d, want >= 11", len(forcedPayload.ByModel))
+	}
+	// Aggregate points still include everything (top + tail).
+	var allReq int64
+	for _, p := range forcedPayload.Points {
+		allReq += p.Requests
+	}
+	if allReq != 31 { // 10*3 + 1
+		t.Fatalf("aggregate requests = %d, want 31", allReq)
 	}
 }
